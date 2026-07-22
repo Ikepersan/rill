@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="800" viewBox="0 0 660 400">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfaf7"/>
+      <stop offset="1" stop-color="#f2efe8"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#4d453c" flood-opacity=".12"/>
+    </filter>
+  </defs>
+  <rect width="660" height="400" fill="url(#paper)"/>
+  <circle cx="330" cy="200" r="238" fill="none" stroke="#718775" stroke-opacity=".08" stroke-width="1"/>
+  <g transform="translate(52 42)">
+    <rect width="38" height="38" rx="12" ry="12" fill="#a45f45" filter="url(#shadow)"/>
+    <path d="M0 31V12A12 12 0 0 1 12 0h26v26a12 12 0 0 1-12 12H7a7 7 0 0 1-7-7Z" fill="#a45f45"/>
+    <text x="19" y="26" text-anchor="middle" fill="#fff" font-family="Georgia, serif" font-size="20" font-weight="600">R</text>
+    <text x="51" y="27" fill="#302f2b" font-family="Georgia, serif" font-size="26" font-weight="600">Rill</text>
+  </g>
+  <text x="330" y="116" text-anchor="middle" fill="#4a4741" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="600">RillをApplicationsへ</text>
+  <text x="330" y="140" text-anchor="middle" fill="#817c73" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">アイコンを右へドラッグしてインストール</text>
+  <path d="M270 220H379" fill="none" stroke="#718775" stroke-width="3" stroke-linecap="round"/>
+  <path d="m368 208 14 12-14 12" fill="none" stroke="#718775" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="270" cy="220" r="4" fill="#a45f45"/>
+  <text x="330" y="354" text-anchor="middle" fill="#9a958c" font-family="Georgia, serif" font-size="11" font-style="italic">Still waters run deep.</text>
+</svg>

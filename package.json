@@ -1,0 +1,54 @@
+{
+  "name": "rill",
+  "version": "0.8.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "release:macos": "bash scripts/release-macos.sh",
+    "release:macos:check": "bash scripts/check-macos-release.sh",
+    "desktop:frontend:dev": "vite --config desktop/vite.config.ts",
+    "desktop:frontend:csl": "vite --config desktop/vite.config.ts --host 127.0.0.1 --port 1423",
+    "desktop:frontend:build": "vite build --config desktop/vite.config.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern vendor",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@citation-js/core": "^0.8.2",
+    "@citation-js/plugin-csl": "^0.8.2",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "drizzle-orm": "0.45.2",
+    "next": "16.2.6",
+    "pdfjs-dist": "^6.1.200",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "drizzle-kit": "0.31.10",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "8.0.13",
+    "wrangler": "4.92.0"
+  },
+  "type": "module"
+}

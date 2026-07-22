@@ -1,0 +1,6 @@
+# Audited third-party build outputs and reproducible upstream patches retain
+# their source line endings and whitespace verbatim.
+desktop/public/rill-pdf-engine/*.js -whitespace
+desktop/public/rill-pdf-engine/pdf/build/*.mjs -whitespace
+desktop/public/rill-pdf-engine/pdf/web/*.mjs -whitespace
+patches/zotero-reader/*.patch -whitespace

@@ -1,0 +1,69 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Rill",
+  "version": "0.8.0",
+  "identifier": "app.rill.library",
+  "build": {
+    "beforeDevCommand": "npm run desktop:frontend:dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run desktop:frontend:build",
+    "frontendDist": "../desktop/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Rill",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1040,
+        "minHeight": 700,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "externalBin": ["binaries/rill-translate"],
+    "license": "AGPL-3.0-only",
+    "resources": {
+      "../desktop/public/rill-pdf-engine/COPYING": "licenses/AGPL-3.0.txt",
+      "../desktop/public/rill-pdf-engine/pdf/LICENSE": "licenses/PDFJS-APACHE-2.0.txt",
+      "../AGPL_NOTICE.md": "licenses/RILL-AGPL-NOTICE.md",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD-PARTY-NOTICES.md"
+    },
+    "macOS": {
+      "signingIdentity": "-",
+      "dmg": {
+        "background": "./images/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "windowPosition": {
+          "x": 200,
+          "y": 160
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 220
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 220
+        }
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ]
+  }
+}

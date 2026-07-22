@@ -1,0 +1,288 @@
+diff --git a/package.json b/package.json
+index 98586e8..0106c36 100644
+--- a/package.json
++++ b/package.json
+@@ -8,6 +8,7 @@
+ 		"build:zotero": "PDFJS_CONFIG=zotero bash pdfjs/build && webpack --config-name zotero",
+ 		"build:ios": "webpack --config-name ios",
+ 		"build:android": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack --config-name android",
++		"build:rill": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack --config-name rill",
+ 		"start": "webpack-dev-server --mode development --config-name dev",
+ 		"view-dev": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack-dev-server --mode development --config-name view-dev",
+ 		"test": "echo \"No tests yet\""
+diff --git a/src/common/annotation-manager.js b/src/common/annotation-manager.js
+index df11939..eb11dde 100644
+--- a/src/common/annotation-manager.js
++++ b/src/common/annotation-manager.js
+@@ -59,6 +59,15 @@ class AnnotationManager {
+ 		this.render();
+ 	}
+ 
++	// Replace the complete render snapshot without asking the embedded reader to
++	// make persistence or conflict-resolution decisions. Rill owns that state.
++	replaceAnnotations(annotations) {
++		this._annotations = annotations.slice();
++		this._annotations.sort((a, b) => (a.sortIndex > b.sortIndex) - (a.sortIndex < b.sortIndex));
++		this._clearInterferingHistory(this._annotations.map(x => x.id));
++		this.render();
++	}
++
+ 	// Called when deletions come from the client side
+ 	unsetAnnotations(ids) {
+ 		this._annotations = this._annotations.filter(x => !ids.includes(x.id));
+diff --git a/src/common/view.js b/src/common/view.js
+index 9133044..2c7cbef 100644
+--- a/src/common/view.js
++++ b/src/common/view.js
+@@ -64,6 +64,9 @@ class View {
+ 
+ 	_createView() {
+ 		let onAddAnnotation = async (annotation) => {
++			if (this._options.onCreateAnnotation) {
++				return this._options.onCreateAnnotation(annotation);
++			}
+ 			await this._annotationManager.addAnnotation(annotation);
+ 		};
+ 
+@@ -161,6 +164,10 @@ class View {
+ 		this._annotationManager.setAnnotations(annotations);
+ 	}
+ 
++	setAnnotationSnapshot(annotations) {
++		this._annotationManager.replaceAnnotations(annotations);
++	}
++
+ 	// Remove annotations from the view
+ 	unsetAnnotations(ids) {
+ 		this._annotationManager.unsetAnnotations(ids);
+@@ -304,6 +311,15 @@ class View {
+ 		this._view.setSpreadMode(mode);
+ 	}
+ 
++	clearSelection() {
++		this._view.clearSelection?.();
++	}
++
++	destroy() {
++		this._view.destroy?.();
++		this._options.container.replaceChildren();
++	}
++
+ 	/**
+ 	 * @returns {string} Theme ID
+ 	 */
+diff --git a/src/pdf/lib/render.js b/src/pdf/lib/render.js
+index ddad3ea..f182400 100644
+--- a/src/pdf/lib/render.js
++++ b/src/pdf/lib/render.js
+@@ -73,7 +73,7 @@ export function drawAnnotationsOnCanvas(canvas, viewport, annotations, pageIndex
+ 				ctx.fillRect(rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]);
+ 			}
+ 		}
+-		else if (annotation.type === 'underline') {
++		else if (annotation.type === 'underline' || annotation.type === 'strikeout') {
+ 			let color = annotation.color;
+ 			let pageData = pdfPages[pageIndex];
+ 			ctx.fillStyle = color;
+@@ -102,12 +102,18 @@ export function drawAnnotationsOnCanvas(canvas, viewport, annotations, pageIndex
+ 				rotation += getRotationDegrees(viewport.transform);
+ 				rotation = normalizeDegrees(rotation);
+ 				let [x1, y1, x2, y2] = rect;
+-				let rect2 = (
+-					rotation === 0 && [x1, y2 - width, x2, y2]
+-					|| rotation === 90 && [x2 - width, y2, x2, y1]
+-					|| rotation === 180 && [x1, y1, x2, y1 - width]
+-					|| rotation === 270 && [x1, y2, x1 - width, y1]
+-				);
++				let middleX = (x1 + x2) / 2;
++				let middleY = (y1 + y2) / 2;
++				let rect2 = annotation.type === 'strikeout'
++					? (rotation % 180 === 0
++						? [x1, middleY - width / 2, x2, middleY + width / 2]
++						: [middleX - width / 2, y2, middleX + width / 2, y1])
++					: (
++						rotation === 0 && [x1, y2 - width, x2, y2]
++						|| rotation === 90 && [x2 - width, y2, x2, y1]
++						|| rotation === 180 && [x1, y1, x2, y1 - width]
++						|| rotation === 270 && [x1, y2, x1 - width, y1]
++					);
+ 				ctx.fillRect(rect2[0], rect2[1], rect2[2] - rect2[0], rect2[3] - rect2[1]);
+ 			}
+ 		}
+diff --git a/src/pdf/page.js b/src/pdf/page.js
+index 9af7569..9ec90b1 100644
+--- a/src/pdf/page.js
++++ b/src/pdf/page.js
+@@ -227,6 +227,46 @@ export default class Page {
+ 		}
+ 	}
+ 
++	_pushStrikeout(items, annotation) {
++		let pageData = this._layer._pdfPages[this._pageIndex];
++		if (!pageData) {
++			return;
++		}
++		let dark = this._layer._themeColorScheme === 'dark';
++		let style = {
++			color: annotation.color,
++			opacity: dark ? 0.9 : 1,
++			blend: dark ? undefined : 'multiply'
++		};
++		let { chars } = pageData;
++		let position = this._p2v(annotation.position);
++		let rects = position.nextPageRects && position.pageIndex + 1 === this._pageIndex
++			? position.nextPageRects
++			: position.rects;
++		let pdfRect = annotation.position.nextPageRects && annotation.position.pageIndex + 1 === this._pageIndex
++			? annotation.position.nextPageRects[0]
++			: annotation.position.rects[0];
++		let width = 1 * this._scale;
++		for (let rect of rects) {
++			let rotation = this._getTextRotation(chars, pdfRect);
++			let [x1, y1, x2, y2] = rect;
++			let middleX = (x1 + x2) / 2;
++			let middleY = (y1 + y2) / 2;
++			let rect2 = (
++				rotation === 0 && [x1, middleY - width / 2, x2, middleY + width / 2]
++				|| rotation === 90 && [middleX - width / 2, y2, middleX + width / 2, y1]
++				|| rotation === 180 && [x1, middleY - width / 2, x2, middleY + width / 2]
++				|| rotation === 270 && [middleX - width / 2, y2, middleX + width / 2, y1]
++			);
++			this._pushRect(items, [
++				Math.min(rect2[0], rect2[2]),
++				Math.min(rect2[1], rect2[3]),
++				Math.max(rect2[0], rect2[2]),
++				Math.max(rect2[1], rect2[3])
++			], style);
++		}
++	}
++
+ 	_pushNote(items, annotation) {
+ 		let position = this._p2v(annotation.position);
+ 		let viewRect = position.rects[0];
+@@ -692,6 +732,9 @@ export default class Page {
+ 			else if (annotation.type === 'underline' && !rangeUpdating) {
+ 				this._pushUnderline(items, annotation);
+ 			}
++			else if (annotation.type === 'strikeout' && !rangeUpdating) {
++				this._pushStrikeout(items, annotation);
++			}
+ 			else if (annotation.type === 'note') {
+ 				this._pushNote(items, annotation);
+ 			}
+diff --git a/webpack.config.js b/webpack.config.js
+index 2973701..3fb2e4f 100644
+--- a/webpack.config.js
++++ b/webpack.config.js
+@@ -194,7 +194,7 @@ function generateViewConfig(build) {
+ 				filename: '[name].css',
+ 			}),
+ 			new HtmlWebpackPlugin({
+-				template: './index.view.html',
++				template: build === 'rill' ? './index.rill.html' : './index.view.html',
+ 				filename: './[name].html',
+ 				templateParameters: {
+ 					build
+@@ -203,7 +203,7 @@ function generateViewConfig(build) {
+ 		],
+ 	};
+ 
+-	if (build === 'android' || build === 'view-dev') {
++	if (build === 'android' || build === 'rill' || build === 'view-dev') {
+ 		config.plugins.push(
+ 			new CopyWebpackPlugin({
+ 				patterns: [
+@@ -336,5 +336,6 @@ module.exports = [
+ 	generateReaderConfig('dev'),
+ 	generateViewConfig('ios'),
+ 	generateViewConfig('android'),
++	generateViewConfig('rill'),
+ 	generateViewConfig('view-dev'),
+ ];
+diff --git a/src/index.rill.js b/src/index.rill.js
+new file mode 100644
+index 0000000..f7c71c5
+--- /dev/null
++++ b/src/index.rill.js
+@@ -0,0 +1,64 @@
++import View from './common/view';
++
++// UI-free bridge used by Rill. The upstream View renders PDF pages and text
++// geometry only; Rill owns menus, notes, annotation state and persistence.
++window.createRillPdfEngine = (options) => {
++	let revision = -1;
++	let listeners = new Set();
++	let emit = (type, payload = {}) => {
++		for (let listener of listeners) {
++			listener({ type, ...payload });
++		}
++	};
++	let view = new View({
++		...options,
++		platform: 'web',
++		container: document.getElementById('view'),
++		onInitialized: () => emit('initialized'),
++		onSaveAnnotations: () => undefined,
++		onCreateAnnotation: (annotation) => emit('annotation-draft', { annotation }),
++		onSetOutline: (outline) => emit('outline-changed', { outline }),
++		onRequestPassword: () => emit('password-required'),
++		onInitThumbnails: () => undefined,
++		onRenderThumbnail: () => undefined,
++		onSetThumbnails: () => undefined,
++		onSetPageLabels: (pageLabels) => emit('page-labels-changed', { pageLabels }),
++		onDeleteAnnotations: () => undefined,
++		onSelectAnnotations: (ids) => emit('annotations-selected', { ids }),
++		onSetSelectionPopup: (params) => emit(params ? 'selection-finalized' : 'selection-cleared', params || {}),
++		onSetAnnotationPopup: (params) => emit(params ? 'annotation-activated' : 'annotation-deactivated', params || {}),
++		onOpenLink: (url) => emit('link-opened', { url }),
++		onFindResult: (result) => emit('search-changed', { result }),
++		onChangeViewState: (state) => emit('view-state-changed', { state }),
++		onChangeViewStats: (stats) => emit('view-stats-changed', { stats }),
++		onBackdropTap: () => emit('backdrop-tapped')
++	});
++
++	return Object.freeze({
++		navigate: target => view.navigate(target),
++		zoomIn: () => view.zoomIn(),
++		zoomOut: () => view.zoomOut(),
++		zoomPageWidth: () => view.zoomReset(),
++		setSpread: enabled => view.setSpreadMode(enabled ? 1 : 0),
++		setTool: tool => view.setTool(tool === 'area-capture' ? { type: 'image' } : { type: 'pointer' }),
++		setAnnotations: (snapshot, nextRevision) => {
++			if (nextRevision < revision) return false;
++			revision = nextRevision;
++			view.setAnnotationSnapshot(snapshot);
++			return true;
++		},
++		search: query => view.find(query ? { query, highlightAll: true, caseSensitive: false, entireWord: false } : null),
++		findNext: () => view.findNext(),
++		findPrevious: () => view.findPrevious(),
++		clearSelection: () => view.clearSelection(),
++		subscribe: listener => {
++			listeners.add(listener);
++			return () => listeners.delete(listener);
++		},
++		destroy: () => {
++			listeners.clear();
++			view.destroy();
++			view = null;
++		}
++	});
++};
+diff --git a/index.rill.html b/index.rill.html
+new file mode 100644
+index 0000000..274e0b4
+--- /dev/null
++++ b/index.rill.html
+@@ -0,0 +1,11 @@
++<!DOCTYPE html>
++<html lang="en" dir="ltr">
++<head>
++	<meta charset="UTF-8">
++	<title>Rill PDF selection engine</title>
++	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
++</head>
++<body>
++	<div id="view"></div>
++</body>
++</html>

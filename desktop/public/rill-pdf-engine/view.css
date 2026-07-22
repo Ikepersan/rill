@@ -1,0 +1,13 @@
+html,body{margin:0;padding:0;height:100%;touch-action:none;pointer-events:none;overscroll-behavior:none}
+
+#view{position:absolute;inset:var(--safe-area-inset-top, 0px) var(--safe-area-inset-right, 0px) var(--safe-area-inset-bottom, 0px) var(--safe-area-inset-left, 0px);overflow:hidden}
+
+#view>iframe{border:0;pointer-events:auto;filter:blur(0px);transition:filter .2s ease-in}
+
+[dir="ltr"] #view>iframe{transform-origin:top left}
+
+[dir="rtl"] #view>iframe{transform-origin:top right}
+
+#view>iframe.mask-resizing{filter:blur(10px);transition:filter .1s ease-in;position:absolute}
+
+/*# sourceMappingURL=view.css.map*/

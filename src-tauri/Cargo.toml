@@ -1,0 +1,26 @@
+[package]
+name = "rill"
+version = "0.8.0"
+description = "A calm, local-first medical literature library"
+authors = ["Rill"]
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[lib]
+name = "rill_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }

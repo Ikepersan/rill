@@ -1,0 +1,11 @@
+Rill is licensed under the GNU Affero General Public License version 3
+(AGPL-3.0-only).
+
+The complete, unmodified license text distributed with this source is at:
+
+desktop/public/rill-pdf-engine/COPYING
+
+Rill contains a modified build of Zotero Reader. Its copyright attribution,
+fixed upstream revision, modification notice, patch and rebuild instructions
+are documented in THIRD_PARTY_NOTICES.md and
+desktop/public/rill-pdf-engine/PROVENANCE.md.
