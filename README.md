@@ -4,6 +4,15 @@ Rill is a local-first macOS application for managing medical papers. PDFs remain
 in a user-selected local folder, while bibliographic metadata, reading notes,
 annotations, and Obsidian-compatible Markdown stay alongside the library.
 
+## Download Rill 0.8.0
+
+**[Rill 0.8.0 for Apple siliconをダウンロード（DMG・約9.4 MB）](https://github.com/Ikepersan/rill/releases/download/v0.8.0/Rill_0.8.0_aarch64.dmg)**
+
+ダウンロードしたDMGを開き、`Rill.app`を`Applications`へドラッグしてください。
+この配布物はDeveloper IDで署名し、Appleのノータライズを通過しています。
+
+[リリース情報とSHA-256を確認する](https://github.com/Ikepersan/rill/releases/tag/v0.8.0)
+
 ## Current preview
 
 Version `0.8.0` is the current pre-release preview and includes:
