@@ -7,12 +7,16 @@ use std::{
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::{OnceLock, RwLock},
     time::SystemTime,
 };
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 const LIBRARY_DIRS: [&str; 6] = ["Inbox", "Papers", "Notes", "Exports", "Trash", ".rill"];
+static AUTHORIZED_LIBRARY_ROOT: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +70,31 @@ pub struct Paper {
 pub struct TrashEntry {
     pub paper: Paper,
     pub deleted_at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryIndexEntry {
+    pdf_sha256: String,
+    pdf_path: String,
+    note_path: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct LibraryIndex {
+    version: u32,
+    #[serde(default)]
+    papers: HashMap<String, LibraryIndexEntry>,
+}
+
+impl Default for LibraryIndex {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            papers: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -175,12 +204,42 @@ fn default_status() -> String {
     "未読".to_string()
 }
 
+fn authorized_library_root() -> &'static RwLock<Option<PathBuf>> {
+    AUTHORIZED_LIBRARY_ROOT.get_or_init(|| RwLock::new(None))
+}
+
+fn authorize_library_root(path: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("ライブラリの場所を確認できませんでした: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("ライブラリにはフォルダを指定してください".into());
+    }
+    *authorized_library_root()
+        .write()
+        .map_err(|_| "ライブラリのアクセス状態を更新できませんでした".to_string())? =
+        Some(canonical.clone());
+    Ok(canonical)
+}
+
 fn root_path(root: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(root);
     if !path.is_absolute() {
         return Err("ライブラリには絶対パスを指定してください".into());
     }
-    Ok(path)
+    let canonical = fs::canonicalize(&path)
+        .map_err(|error| format!("ライブラリの場所を確認できませんでした: {error}"))?;
+    let authorized = authorized_library_root()
+        .read()
+        .map_err(|_| "ライブラリのアクセス状態を確認できませんでした".to_string())?
+        .clone()
+        .ok_or_else(|| {
+            "ライブラリへのアクセスが許可されていません。保存場所を選び直してください"
+                .to_string()
+        })?;
+    if canonical != authorized {
+        return Err("選択中のRillライブラリ以外にはアクセスできません".into());
+    }
+    Ok(canonical)
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -195,7 +254,172 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
     {
         return Err("ライブラリ外のファイルにはアクセスできません".into());
     }
-    Ok(root.join(relative_path))
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("ライブラリの場所を確認できませんでした: {error}"))?;
+    let candidate = root.join(relative_path);
+    let mut existing = candidate.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "ライブラリ内のパスを確認できませんでした".to_string())?;
+    }
+    let canonical_existing = fs::canonicalize(existing)
+        .map_err(|error| format!("ライブラリ内のパスを確認できませんでした: {error}"))?;
+    if !canonical_existing.starts_with(&canonical_root) {
+        return Err("シンボリックリンクの参照先がライブラリ外です".into());
+    }
+    Ok(candidate)
+}
+
+fn library_root_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("library-root.json"))
+        .map_err(|error| format!("Rillの設定保存場所を確認できませんでした: {error}"))
+}
+
+fn persist_library_root(app: &AppHandle, root: &Path) -> Result<(), String> {
+    let config = library_root_config_path(app)?;
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Rillの設定フォルダを作成できませんでした: {error}"))?;
+    }
+    let content = serde_json::to_vec_pretty(&root.to_string_lossy().to_string())
+        .map_err(|error| format!("ライブラリ設定を作成できませんでした: {error}"))?;
+    let temporary = config.with_extension("json.tmp");
+    write_synced_then_rename(
+        &temporary,
+        &config,
+        &content,
+        "ライブラリ設定を保存できませんでした",
+        "ライブラリ設定を確定できませんでした",
+    )
+}
+
+fn write_synced_then_rename(
+    temporary: &Path,
+    destination: &Path,
+    content: &[u8],
+    write_message: &str,
+    commit_message: &str,
+) -> Result<(), String> {
+    let mut file =
+        File::create(temporary).map_err(|error| format!("{write_message}: {error}"))?;
+    file.write_all(content)
+        .map_err(|error| format!("{write_message}: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("{write_message}: {error}"))?;
+    drop(file);
+    fs::rename(temporary, destination).map_err(|error| format!("{commit_message}: {error}"))
+}
+
+fn library_index_path(root: &Path) -> PathBuf {
+    root.join(".rill/index.json")
+}
+
+fn load_library_index(root: &Path) -> (LibraryIndex, bool) {
+    let path = library_index_path(root);
+    let Ok(json) = fs::read(&path) else {
+        return (LibraryIndex::default(), true);
+    };
+    match serde_json::from_slice::<LibraryIndex>(&json) {
+        Ok(index) if index.version <= 1 => (index, true),
+        Ok(index) => {
+            eprintln!(
+                "Rill index version {} is newer than this app; leaving it unchanged",
+                index.version
+            );
+            (index, false)
+        }
+        Err(error) => {
+            eprintln!("Rill index is unreadable and will be rebuilt: {error}");
+            (LibraryIndex::default(), true)
+        }
+    }
+}
+
+fn store_library_index(root: &Path, index: &LibraryIndex) -> Result<(), String> {
+    let path = library_index_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("文献インデックスのフォルダを作成できませんでした: {error}"))?;
+    }
+    let content = serde_json::to_vec_pretty(index)
+        .map_err(|error| format!("文献インデックスを作成できませんでした: {error}"))?;
+    let temporary = path.with_extension("json.rilltmp");
+    write_synced_then_rename(
+        &temporary,
+        &path,
+        &content,
+        "文献インデックスを保存できませんでした",
+        "文献インデックスを確定できませんでした",
+    )
+}
+
+fn hash_hex(path: &Path) -> Result<String, String> {
+    Ok(hash_file(path)?
+        .into_iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn index_entry_for_paper(
+    root: &Path,
+    paper: &Paper,
+    existing: Option<&LibraryIndexEntry>,
+    known_hash: Option<&str>,
+) -> Result<LibraryIndexEntry, String> {
+    let pdf = safe_join(root, &paper.pdf_path)?;
+    let pdf_sha256 = match (known_hash, existing) {
+        (Some(hash), _) if !hash.is_empty() => hash.to_string(),
+        (_, Some(entry)) if !entry.pdf_sha256.is_empty() => entry.pdf_sha256.clone(),
+        _ => hash_hex(&pdf)?,
+    };
+    if let Some(entry) = existing {
+        if entry.pdf_sha256 == pdf_sha256
+            && entry.pdf_path == paper.pdf_path
+            && entry.note_path == paper.note_path
+        {
+            return Ok(entry.clone());
+        }
+    }
+    Ok(LibraryIndexEntry {
+        pdf_sha256,
+        pdf_path: paper.pdf_path.clone(),
+        note_path: paper.note_path.clone(),
+        updated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn best_effort_upsert_index(root: &Path, paper: &Paper) {
+    let (mut index, writable) = load_library_index(root);
+    if !writable {
+        return;
+    }
+    let entry = match index_entry_for_paper(root, paper, index.papers.get(&paper.id), None) {
+        Ok(entry) => entry,
+        Err(error) => {
+            eprintln!("Rill index entry could not be updated: {error}");
+            return;
+        }
+    };
+    if index.papers.get(&paper.id) == Some(&entry) {
+        return;
+    }
+    index.papers.insert(paper.id.clone(), entry);
+    if let Err(error) = store_library_index(root, &index) {
+        eprintln!("Rill index could not be saved: {error}");
+    }
+}
+
+fn best_effort_remove_index(root: &Path, paper_id: &str) {
+    let (mut index, writable) = load_library_index(root);
+    if !writable || index.papers.remove(paper_id).is_none() {
+        return;
+    }
+    if let Err(error) = store_library_index(root, &index) {
+        eprintln!("Rill index could not be saved after removal: {error}");
+    }
 }
 
 fn relative_string(root: &Path, path: &Path) -> Result<String, String> {
@@ -323,12 +547,15 @@ fn note_revision(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn revision_snapshot_path(root: &Path, paper_id: &str) -> Result<PathBuf, String> {
-    if paper_id.is_empty()
-        || !paper_id
+fn is_valid_paper_id(paper_id: &str) -> bool {
+    !paper_id.is_empty()
+        && paper_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
+}
+
+fn revision_snapshot_path(root: &Path, paper_id: &str) -> Result<PathBuf, String> {
+    if !is_valid_paper_id(paper_id) {
         return Err("文献IDが不正です".into());
     }
     Ok(root
@@ -413,13 +640,20 @@ fn section(body: &str, heading: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-fn paper_from_files(root: &Path, pdf_path: &Path) -> Result<Paper, String> {
+fn paper_from_files_with_identity(
+    root: &Path,
+    pdf_path: &Path,
+    note_path_override: Option<&Path>,
+    preferred_id: Option<&str>,
+) -> Result<Paper, String> {
     let pdf_relative = relative_string(root, pdf_path)?;
     let stem = pdf_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("paper");
-    let note_path = root.join("Notes").join(format!("{stem}.md"));
+    let note_path = note_path_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join("Notes").join(format!("{stem}.md")));
     let note_relative = relative_string(root, &note_path)?;
     let default_title = title_from_filename(pdf_path);
     let default_added_at = file_time(pdf_path);
@@ -431,12 +665,16 @@ fn paper_from_files(root: &Path, pdf_path: &Path) -> Result<Paper, String> {
         let frontmatter = yaml
             .and_then(|yaml| serde_yaml::from_str::<PaperFrontmatter>(yaml).ok())
             .unwrap_or_default();
+        let id = is_valid_paper_id(&frontmatter.rill_id)
+            .then(|| frontmatter.rill_id.clone())
+            .or_else(|| {
+                preferred_id
+                    .filter(|id| is_valid_paper_id(id))
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let paper = ensure_citation_key(Paper {
-            id: if frontmatter.rill_id.is_empty() {
-                Uuid::new_v4().to_string()
-            } else {
-                frontmatter.rill_id
-            },
+            id,
             title: if frontmatter.title.is_empty() {
                 default_title
             } else {
@@ -474,7 +712,10 @@ fn paper_from_files(root: &Path, pdf_path: &Path) -> Result<Paper, String> {
     }
 
     let paper = Paper {
-        id: Uuid::new_v4().to_string(),
+        id: preferred_id
+            .filter(|id| is_valid_paper_id(id))
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         title: default_title,
         authors: Vec::new(),
         year: year_from_filename(pdf_path),
@@ -561,10 +802,13 @@ fn write_paper(root: &Path, paper: &Paper) -> Result<(), String> {
     let body = replace_markdown_section(&body, "PDF", &format!("[[{}]]", paper.pdf_path));
     let markdown = format!("---\n{yaml}---\n\n{}", body.trim_start());
     let temporary = note_path.with_extension("md.rilltmp");
-    fs::write(&temporary, markdown)
-        .map_err(|error| format!("ノートを保存できませんでした: {error}"))?;
-    fs::rename(&temporary, &note_path)
-        .map_err(|error| format!("ノートを確定できませんでした: {error}"))?;
+    write_synced_then_rename(
+        &temporary,
+        &note_path,
+        markdown.as_bytes(),
+        "ノートを保存できませんでした",
+        "ノートを確定できませんでした",
+    )?;
     Ok(())
 }
 
@@ -1010,11 +1254,7 @@ fn unique_destination(folder: &Path, source: &Path) -> PathBuf {
     folder.join(format!("{}.{extension}", Uuid::new_v4()))
 }
 
-#[tauri::command]
-pub fn initialize_library(root: String) -> Result<(), String> {
-    let root = root_path(&root)?;
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("ライブラリフォルダを作成できませんでした: {error}"))?;
+fn initialize_library_path(root: &Path) -> Result<(), String> {
     for folder in LIBRARY_DIRS {
         fs::create_dir_all(root.join(folder))
             .map_err(|error| format!("{folder}フォルダを作成できませんでした: {error}"))?;
@@ -1028,13 +1268,191 @@ pub fn initialize_library(root: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn restore_library_root(app: AppHandle) -> Result<Option<String>, String> {
+    let config = library_root_config_path(&app)?;
+    if !config.is_file() {
+        return Ok(None);
+    }
+    let stored = fs::read_to_string(&config)
+        .map_err(|error| format!("ライブラリ設定を読み込めませんでした: {error}"))?;
+    let path = serde_json::from_str::<String>(&stored)
+        .map(PathBuf::from)
+        .map_err(|error| format!("ライブラリ設定が壊れています: {error}"))?;
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    let canonical = authorize_library_root(&path)?;
+    initialize_library_path(&canonical)?;
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub fn migrate_library_root(app: AppHandle, root: String) -> Result<Option<String>, String> {
+    if library_root_config_path(&app)?.is_file() {
+        return restore_library_root(app);
+    }
+    let path = PathBuf::from(root);
+    if !path.is_absolute()
+        || !path.join(".rill/settings.json").is_file()
+        || !path.join("Notes").is_dir()
+    {
+        return Ok(None);
+    }
+    let canonical = authorize_library_root(&path)?;
+    persist_library_root(&app, &canonical)?;
+    initialize_library_path(&canonical)?;
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn choose_library_root(app: AppHandle) -> Result<Option<String>, String> {
+    let Some(selection) = app
+        .dialog()
+        .file()
+        .set_title("Rillライブラリを選択")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = selection
+        .into_path()
+        .map_err(|error| format!("選択したフォルダを読み取れませんでした: {error}"))?;
+    let canonical = authorize_library_root(&path)?;
+    initialize_library_path(&canonical)?;
+    persist_library_root(&app, &canonical)?;
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub fn initialize_library(root: String) -> Result<(), String> {
+    let root = root_path(&root)?;
+    initialize_library_path(&root)
+}
+
+#[tauri::command]
 pub fn scan_library(root: String) -> Result<Vec<Paper>, String> {
     let root = root_path(&root)?;
     initialize_library(root.to_string_lossy().to_string())?;
-    let mut papers = pdf_paths(&root)
-        .iter()
-        .map(|path| paper_from_files(&root, path))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (mut index, index_writable) = load_library_index(&root);
+    let original_index = index.clone();
+    let mut claimed_ids = HashSet::new();
+    let mut papers = Vec::new();
+    for path in pdf_paths(&root) {
+        let pdf_relative = relative_string(&root, &path)?;
+        let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("paper");
+        let stem_note = root.join("Notes").join(format!("{stem}.md"));
+        let mut preferred_id = None;
+        let mut note_override = None;
+        let mut known_hash = None;
+        let mut relinked = false;
+
+        let mut exact_ids = index
+            .papers
+            .iter()
+            .filter(|(id, entry)| entry.pdf_path == pdf_relative && !claimed_ids.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        exact_ids.sort();
+        if let Some(id) = exact_ids.first() {
+            if let Some(entry) = index.papers.get(id) {
+                if let Ok(note) = safe_join(&root, &entry.note_path) {
+                    preferred_id = Some(id.clone());
+                    note_override = Some(note);
+                    known_hash = (!entry.pdf_sha256.is_empty()).then(|| entry.pdf_sha256.clone());
+                }
+            }
+        }
+
+        if preferred_id.is_none() && stem_note.is_file() {
+            note_override = Some(stem_note);
+        }
+
+        if preferred_id.is_none() && note_override.is_none() {
+            let pdf_hash = hash_hex(&path)?;
+            let mut candidates = index
+                .papers
+                .iter()
+                .filter(|(id, entry)| {
+                    !claimed_ids.contains(*id)
+                        && entry.pdf_sha256 == pdf_hash
+                        && safe_join(&root, &entry.pdf_path)
+                            .map(|recorded| !recorded.is_file())
+                            .unwrap_or(false)
+                })
+                .map(|(id, entry)| (id.clone(), entry.clone()))
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| left.0.cmp(&right.0));
+            if candidates.len() > 1 {
+                let stem_matches = candidates
+                    .iter()
+                    .filter(|(_, entry)| {
+                        Path::new(&entry.note_path)
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            == Some(stem)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if stem_matches.len() == 1 {
+                    candidates = stem_matches;
+                }
+            }
+            if candidates.len() == 1 {
+                let (id, entry) = candidates.remove(0);
+                if let Ok(note) = safe_join(&root, &entry.note_path) {
+                    preferred_id = Some(id);
+                    note_override = Some(note);
+                    known_hash = Some(pdf_hash);
+                    relinked = true;
+                }
+            }
+        }
+
+        let paper = paper_from_files_with_identity(
+            &root,
+            &path,
+            note_override.as_deref(),
+            preferred_id.as_deref(),
+        )?;
+        if index_writable {
+            if let Some(index_id) = preferred_id.as_deref() {
+                if index_id != paper.id {
+                    index.papers.remove(index_id);
+                }
+            }
+        }
+        if relinked {
+            write_paper(&root, &paper)?;
+        }
+        if claimed_ids.insert(paper.id.clone()) {
+            if index_writable {
+                match index_entry_for_paper(
+                    &root,
+                    &paper,
+                    index.papers.get(&paper.id),
+                    known_hash.as_deref(),
+                ) {
+                    Ok(entry) => {
+                        index.papers.insert(paper.id.clone(), entry);
+                    }
+                    Err(error) => {
+                        eprintln!("Rill index entry could not be rebuilt: {error}");
+                    }
+                }
+            }
+        } else {
+            eprintln!(
+                "Duplicate rill_id {} detected; leaving files unchanged",
+                paper.id
+            );
+        }
+        papers.push(paper);
+    }
+    if index_writable && index != original_index {
+        if let Err(error) = store_library_index(&root, &index) {
+            eprintln!("Rill index could not be saved after scan: {error}");
+        }
+    }
     papers.sort_by(|left, right| right.added_at.cmp(&left.added_at));
     Ok(papers)
 }
@@ -1099,8 +1517,19 @@ pub fn search_library(root: String, query: String) -> Result<Vec<SearchHit>, Str
 }
 
 #[tauri::command]
-pub fn read_csl_style(path: String) -> Result<CslStyleFile, String> {
-    let path = PathBuf::from(path);
+pub async fn read_csl_style(app: AppHandle) -> Result<Option<CslStyleFile>, String> {
+    let Some(selection) = app
+        .dialog()
+        .file()
+        .set_title("CSL引用スタイルを追加")
+        .add_filter("Citation Style Language", &["csl"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selection
+        .into_path()
+        .map_err(|error| format!("選択したCSLファイルを読み取れませんでした: {error}"))?;
     if !path.is_file()
         || !path
             .extension()
@@ -1108,6 +1537,13 @@ pub fn read_csl_style(path: String) -> Result<CslStyleFile, String> {
             .is_some_and(|value| value.eq_ignore_ascii_case("csl"))
     {
         return Err(".csl形式の引用スタイルを選択してください".into());
+    }
+    if fs::metadata(&path)
+        .map_err(|error| format!("CSLスタイルを確認できませんでした: {error}"))?
+        .len()
+        > 2 * 1024 * 1024
+    {
+        return Err("CSLスタイルは2MB以下のファイルを選択してください".into());
     }
     let xml = fs::read_to_string(&path)
         .map_err(|error| format!("CSLスタイルを読み込めませんでした: {error}"))?;
@@ -1121,23 +1557,71 @@ pub fn read_csl_style(path: String) -> Result<CslStyleFile, String> {
         .and_then(|value| value.to_str())
         .unwrap_or("custom-style")
         .to_string();
-    Ok(CslStyleFile { name, xml })
+    Ok(Some(CslStyleFile { name, xml }))
 }
 
 #[tauri::command]
-pub fn read_citation_preset(path: String) -> Result<String, String> {
-    if Path::new(&path).extension().and_then(|extension| extension.to_str()) != Some("json") {
+pub async fn read_citation_preset(app: AppHandle) -> Result<Option<String>, String> {
+    let Some(selection) = app
+        .dialog()
+        .file()
+        .set_title("引用テンプレートJSONを読み込む")
+        .add_filter("Rill Citation Template", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selection
+        .into_path()
+        .map_err(|error| format!("選択したJSONファイルを読み取れませんでした: {error}"))?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
         return Err("JSONファイルを選択してください".into());
     }
-    fs::read_to_string(&path).map_err(|error| format!("テンプレートJSONを読み込めませんでした: {error}"))
+    if fs::metadata(&path)
+        .map_err(|error| format!("テンプレートJSONを確認できませんでした: {error}"))?
+        .len()
+        > 1024 * 1024
+    {
+        return Err("テンプレートJSONは1MB以下のファイルを選択してください".into());
+    }
+    fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|error| format!("テンプレートJSONを読み込めませんでした: {error}"))
 }
 
 #[tauri::command]
-pub fn write_citation_preset(path: String, content: String) -> Result<(), String> {
-    if Path::new(&path).extension().and_then(|extension| extension.to_str()) != Some("json") {
+pub async fn write_citation_preset(
+    app: AppHandle,
+    content: String,
+    suggested_name: String,
+) -> Result<bool, String> {
+    if content.len() > 1024 * 1024 {
+        return Err("テンプレートJSONが大きすぎます".into());
+    }
+    let file_name = Path::new(&suggested_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Rill Citation.rill-citation.json");
+    let Some(selection) = app
+        .dialog()
+        .file()
+        .set_title("引用テンプレートを書き出す")
+        .set_file_name(file_name)
+        .add_filter("Rill Citation Template", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = selection
+        .into_path()
+        .map_err(|error| format!("選択した保存先を読み取れませんでした: {error}"))?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
         return Err("保存先は.jsonファイルにしてください".into());
     }
-    fs::write(&path, content).map_err(|error| format!("テンプレートJSONを書き出せませんでした: {error}"))
+    fs::write(&path, content)
+        .map(|_| true)
+        .map_err(|error| format!("テンプレートJSONを書き出せませんでした: {error}"))
 }
 
 #[tauri::command]
@@ -1234,23 +1718,29 @@ pub fn save_paper(root: String, paper: Paper) -> Result<Paper, String> {
         && note_revision(&note_path) != paper.note_revision
     {
         let base = load_revision_snapshot(&root, &paper).ok_or_else(|| "Obsidian側の更新を検出しました。安全なマージ履歴がないため、↻で再読込してください。".to_string())?;
-        let current = paper_from_files(&root, &safe_join(&root, &paper.pdf_path)?)?;
+        let current = paper_from_files_with_identity(
+            &root,
+            &safe_join(&root, &paper.pdf_path)?,
+            Some(&note_path),
+            Some(&paper.id),
+        )?;
         paper = merge_paper_changes(&base, &paper, &current)?;
     }
     write_paper(&root, &paper)?;
     paper.note_revision = note_revision(&note_path);
     store_revision_snapshot(&root, &paper)?;
+    best_effort_upsert_index(&root, &paper);
     Ok(paper)
 }
 
 #[tauri::command]
 pub fn enrich_metadata(root: String, paper: Paper) -> Result<Paper, String> {
-    let enriched = if paper.pmid.trim().is_empty() {
-        enrich_from_crossref(paper)?
+    root_path(&root)?;
+    if paper.pmid.trim().is_empty() {
+        enrich_from_crossref(paper)
     } else {
-        enrich_from_pubmed(paper)?
-    };
-    save_paper(root, enriched)
+        enrich_from_pubmed(paper)
+    }
 }
 
 #[tauri::command]
@@ -1274,6 +1764,7 @@ pub fn organize_paper(root: String, mut paper: Paper) -> Result<Paper, String> {
     write_paper(&root, &paper)?;
     paper.note_revision = note_revision(&safe_join(&root, &paper.note_path)?);
     store_revision_snapshot(&root, &paper)?;
+    best_effort_upsert_index(&root, &paper);
     Ok(paper)
 }
 
@@ -1381,6 +1872,7 @@ pub fn move_paper_to_collection(
     write_paper(&root, &paper)?;
     paper.note_revision = note_revision(&safe_join(&root, &paper.note_path)?);
     store_revision_snapshot(&root, &paper)?;
+    best_effort_upsert_index(&root, &paper);
     Ok(paper)
 }
 
@@ -1421,21 +1913,56 @@ fn move_files_with_rollback(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> 
     for (source, destination) in pairs {
         if let Some(parent) = destination.parent() {
             if let Err(error) = fs::create_dir_all(parent) {
-                for (original, relocated) in moved.iter().rev() {
-                    let _ = fs::rename(relocated, original);
-                }
-                return Err(format!("移動先フォルダを作成できませんでした: {error}"));
+                let rollback_errors = rollback_moved_files(&moved);
+                return Err(move_failure_message(
+                    format!("移動先フォルダを作成できませんでした: {error}"),
+                    rollback_errors,
+                ));
             }
         }
         if let Err(error) = fs::rename(source, destination) {
-            for (original, relocated) in moved.iter().rev() {
-                let _ = fs::rename(relocated, original);
-            }
-            return Err(format!("文献ファイルを移動できませんでした: {error}"));
+            let rollback_errors = rollback_moved_files(&moved);
+            return Err(move_failure_message(
+                format!("文献ファイルを移動できませんでした: {error}"),
+                rollback_errors,
+            ));
         }
         moved.push((source.clone(), destination.clone()));
     }
     Ok(())
+}
+
+fn rollback_moved_files(moved: &[(PathBuf, PathBuf)]) -> Vec<String> {
+    moved
+        .iter()
+        .rev()
+        .filter_map(|(original, relocated)| {
+            fs::rename(relocated, original).err().map(|error| {
+                format!(
+                    "{} → {}: {error}",
+                    relocated.to_string_lossy(),
+                    original.to_string_lossy()
+                )
+            })
+        })
+        .collect()
+}
+
+fn move_failure_message(message: String, rollback_errors: Vec<String>) -> String {
+    if rollback_errors.is_empty() {
+        message
+    } else {
+        format!(
+            "{message}。一部ファイルを元へ戻せませんでした。Rillのゴミ箱を残しています: {}",
+            rollback_errors.join(" / ")
+        )
+    }
+}
+
+fn move_was_fully_rolled_back(pairs: &[(PathBuf, PathBuf)]) -> bool {
+    pairs
+        .iter()
+        .all(|(source, destination)| source.exists() && !destination.exists())
 }
 
 fn load_trash_entry(root: &Path, paper_id: &str) -> Result<TrashEntry, String> {
@@ -1470,9 +1997,16 @@ pub fn move_paper_to_rill_trash(root: String, paper: Paper) -> Result<TrashEntry
     let manifest = trash_manifest_path(&root, &paper.id)?;
     let json = serde_json::to_vec_pretty(&entry)
         .map_err(|error| format!("復元情報を作成できませんでした: {error}"))?;
-    if let Err(error) = fs::write(&manifest, json) {
+    let manifest_temporary = manifest.with_extension("json.rilltmp");
+    if let Err(error) = write_synced_then_rename(
+        &manifest_temporary,
+        &manifest,
+        &json,
+        "復元情報を保存できませんでした",
+        "復元情報を確定できませんでした",
+    ) {
         let _ = fs::remove_dir_all(&entry_dir);
-        return Err(format!("復元情報を保存できませんでした: {error}"));
+        return Err(error);
     }
     let pairs = paper_managed_relatives(&paper)
         .into_iter()
@@ -1486,9 +2020,16 @@ pub fn move_paper_to_rill_trash(root: String, paper: Paper) -> Result<TrashEntry
         .filter(|(source, _)| source.exists())
         .collect::<Vec<_>>();
     if let Err(error) = move_files_with_rollback(&pairs) {
-        let _ = fs::remove_dir_all(&entry_dir);
-        return Err(error);
+        if move_was_fully_rolled_back(&pairs) {
+            let _ = fs::remove_dir_all(&entry_dir);
+            return Err(error);
+        }
+        return Err(format!(
+            "{error}。復旧確認のため退避先を削除していません: {}",
+            entry_dir.to_string_lossy()
+        ));
     }
+    best_effort_remove_index(&root, &paper.id);
     Ok(entry)
 }
 
@@ -1534,6 +2075,7 @@ pub fn restore_trashed_paper(root: String, paper_id: String) -> Result<Paper, St
     move_files_with_rollback(&pairs)?;
     fs::remove_dir_all(&entry_dir)
         .map_err(|error| format!("復元後のゴミ箱情報を整理できませんでした: {error}"))?;
+    best_effort_upsert_index(&root, &entry.paper);
     Ok(entry.paper)
 }
 
@@ -1543,7 +2085,9 @@ pub fn delete_trashed_paper_permanently(root: String, paper_id: String) -> Resul
     let _ = load_trash_entry(&root, &paper_id)?;
     let entry_dir = trash_entry_dir(&root, &paper_id)?;
     fs::remove_dir_all(entry_dir)
-        .map_err(|error| format!("文献を完全に削除できませんでした: {error}"))
+        .map_err(|error| format!("文献を完全に削除できませんでした: {error}"))?;
+    best_effort_remove_index(&root, &paper_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1749,9 +2293,13 @@ pub fn save_pdf_annotations(
     let temporary = path.with_extension("json.rilltmp");
     let json = serde_json::to_string_pretty(&annotations)
         .map_err(|error| format!("注釈を保存形式へ変換できませんでした: {error}"))?;
-    fs::write(&temporary, json).map_err(|error| format!("注釈を保存できませんでした: {error}"))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("注釈を確定できませんでした: {error}"))?;
+    write_synced_then_rename(
+        &temporary,
+        &path,
+        json.as_bytes(),
+        "注釈を保存できませんでした",
+        "注釈を確定できませんでした",
+    )?;
 
     let note_path = safe_join(&root, &paper.note_path)?;
     let markdown = fs::read_to_string(&note_path)
@@ -1759,10 +2307,13 @@ pub fn save_pdf_annotations(
     let updated =
         replace_markdown_section(&markdown, "Highlights", &annotations_markdown(&annotations));
     let note_temporary = note_path.with_extension("md.rilltmp");
-    fs::write(&note_temporary, updated)
-        .map_err(|error| format!("HighlightsをMarkdownへ保存できませんでした: {error}"))?;
-    fs::rename(&note_temporary, &note_path)
-        .map_err(|error| format!("Highlightsを確定できませんでした: {error}"))
+    write_synced_then_rename(
+        &note_temporary,
+        &note_path,
+        updated.as_bytes(),
+        "HighlightsをMarkdownへ保存できませんでした",
+        "Highlightsを確定できませんでした",
+    )
 }
 
 fn run_macos_open(arguments: &[&str]) -> Result<(), String> {
@@ -1844,13 +2395,302 @@ pub fn open_note_in_obsidian(root: String, note_path: String) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LIBRARY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn library_test_guard() -> MutexGuard<'static, ()> {
+        LIBRARY_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("ライブラリテストを直列化")
+    }
+
+    fn test_library(label: &str) -> (PathBuf, PathBuf) {
+        let test_dir =
+            std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
+        let library = test_dir.join("Rill");
+        fs::create_dir_all(&library).expect("テスト用ライブラリを作成");
+        authorize_library_root(&library).expect("テスト用ライブラリを許可");
+        initialize_library(library.to_string_lossy().to_string())
+            .expect("テスト用ライブラリを初期化");
+        (test_dir, library)
+    }
+
+    #[test]
+    fn failed_multi_file_move_restores_every_moved_file() {
+        let test_dir = std::env::temp_dir().join(format!("rill-trash-rollback-{}", Uuid::new_v4()));
+        let source_dir = test_dir.join("source");
+        let destination_dir = test_dir.join("destination");
+        fs::create_dir_all(&source_dir).expect("移動元を作成");
+        fs::create_dir_all(&destination_dir).expect("移動先を作成");
+        let first = source_dir.join("first.pdf");
+        let second = source_dir.join("second.md");
+        fs::write(&first, b"first").expect("最初のファイルを作成");
+        fs::write(&second, b"second").expect("次のファイルを作成");
+        let blocked_parent = destination_dir.join("blocked");
+        fs::write(&blocked_parent, b"directory blocker").expect("作成失敗条件を用意");
+        let pairs = vec![
+            (first.clone(), destination_dir.join("first.pdf")),
+            (second.clone(), blocked_parent.join("second.md")),
+        ];
+
+        let result = move_files_with_rollback(&pairs);
+
+        assert!(result.is_err(), "2件目の移動は失敗する");
+        assert!(move_was_fully_rolled_back(&pairs));
+        assert_eq!(fs::read(&first).expect("最初のファイルを復元"), b"first");
+        assert_eq!(fs::read(&second).expect("次のファイルを保持"), b"second");
+        assert!(!destination_dir.join("first.pdf").exists());
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_join_rejects_symlinks_that_escape_the_library() {
+        use std::os::unix::fs::symlink;
+
+        let test_dir = std::env::temp_dir().join(format!("rill-symlink-{}", Uuid::new_v4()));
+        let library = test_dir.join("Rill");
+        let outside = test_dir.join("outside");
+        fs::create_dir_all(library.join("Papers")).expect("ライブラリを作成");
+        fs::create_dir_all(&outside).expect("ライブラリ外フォルダを作成");
+        fs::write(outside.join("secret.pdf"), b"outside").expect("ライブラリ外ファイルを作成");
+        symlink(&outside, library.join("Papers/escape")).expect("脱出シンボリックリンクを作成");
+
+        let result = safe_join(&library, "Papers/escape/secret.pdf");
+
+        assert!(result.is_err());
+        assert!(result
+            .expect_err("ライブラリ外を拒否")
+            .contains("シンボリックリンク"));
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn external_pdf_rename_keeps_identity_note_and_annotations() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-rename");
+        let original_pdf = library.join("Inbox/original.pdf");
+        fs::write(&original_pdf, b"%PDF-1.4\nsame paper\n").expect("PDFを作成");
+        let mut paper = scan_library(library.to_string_lossy().to_string())
+            .expect("初回走査")
+            .remove(0);
+        paper.summary = "保持する要約".into();
+        paper.tags = vec!["追跡".into()];
+        paper = save_paper(library.to_string_lossy().to_string(), paper)
+            .expect("書誌を保存");
+        let annotation = PdfAnnotation {
+            id: "rename-highlight".into(),
+            page: 1,
+            text: "identity remains stable".into(),
+            color: "yellow".into(),
+            kind: "highlight".into(),
+            image_data_url: None,
+            comment: "rename test".into(),
+            rects: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        save_pdf_annotations(
+            library.to_string_lossy().to_string(),
+            paper.clone(),
+            vec![annotation],
+        )
+        .expect("注釈を保存");
+        let renamed_pdf = library.join("Inbox/renamed.pdf");
+        fs::rename(&original_pdf, &renamed_pdf).expect("Finder renameを模擬");
+
+        let rescanned = scan_library(library.to_string_lossy().to_string())
+            .expect("rename後に再走査")
+            .remove(0);
+
+        assert_eq!(rescanned.id, paper.id);
+        assert_eq!(rescanned.note_path, paper.note_path);
+        assert_eq!(rescanned.pdf_path, "Inbox/renamed.pdf");
+        assert_eq!(rescanned.summary, "保持する要約");
+        assert_eq!(rescanned.tags, vec!["追跡"]);
+        assert_eq!(
+            load_pdf_annotations(
+                library.to_string_lossy().to_string(),
+                rescanned.id.clone()
+            )
+            .expect("注釈を再読込")
+            .len(),
+            1
+        );
+        let note = fs::read_to_string(library.join(&rescanned.note_path))
+            .expect("再リンク後のノートを読込");
+        assert!(note.contains("[[Inbox/renamed.pdf]]"));
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn duplicate_pdf_hashes_relink_only_the_missing_path() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-duplicate-hash");
+        fs::write(library.join("Inbox/alpha.pdf"), b"%PDF-1.4\nidentical\n")
+            .expect("alpha PDFを作成");
+        fs::write(library.join("Inbox/beta.pdf"), b"%PDF-1.4\nidentical\n")
+            .expect("beta PDFを作成");
+        let initial = scan_library(library.to_string_lossy().to_string())
+            .expect("重複hashを初回走査");
+        let alpha = initial
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("alpha.pdf"))
+            .expect("alphaを取得")
+            .clone();
+        let beta = initial
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("beta.pdf"))
+            .expect("betaを取得")
+            .clone();
+        fs::rename(
+            library.join("Inbox/alpha.pdf"),
+            library.join("Inbox/alpha-renamed.pdf"),
+        )
+        .expect("alphaだけrename");
+
+        let rescanned = scan_library(library.to_string_lossy().to_string())
+            .expect("rename後の重複hashを走査");
+        let renamed = rescanned
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("alpha-renamed.pdf"))
+            .expect("rename済みalpha");
+        let untouched = rescanned
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("beta.pdf"))
+            .expect("未変更beta");
+        assert_eq!(renamed.id, alpha.id);
+        assert_eq!(untouched.id, beta.id);
+        assert!(library.join(&alpha.note_path).exists());
+        assert!(library.join(&beta.note_path).exists());
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn missing_or_corrupt_index_is_rebuilt_from_frontmatter() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-rebuild");
+        fs::write(library.join("Inbox/rebuild.pdf"), b"%PDF-1.4\nrebuild\n")
+            .expect("PDFを作成");
+        let original_id = scan_library(library.to_string_lossy().to_string())
+            .expect("初回走査")[0]
+            .id
+            .clone();
+        fs::write(library_index_path(&library), b"{broken json")
+            .expect("index破損を模擬");
+        let after_corruption = scan_library(library.to_string_lossy().to_string())
+            .expect("破損indexから再構築");
+        assert_eq!(after_corruption[0].id, original_id);
+        let rebuilt = serde_json::from_slice::<LibraryIndex>(
+            &fs::read(library_index_path(&library)).expect("再構築indexを読込"),
+        )
+        .expect("再構築indexを解析");
+        assert_eq!(rebuilt.version, 1);
+        fs::remove_file(library_index_path(&library)).expect("index欠損を模擬");
+        let after_missing = scan_library(library.to_string_lossy().to_string())
+            .expect("欠損indexから再構築");
+        assert_eq!(after_missing[0].id, original_id);
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn newer_index_version_is_not_overwritten() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-forward");
+        fs::write(library.join("Inbox/future.pdf"), b"%PDF-1.4\nfuture\n")
+            .expect("PDFを作成");
+        let future_index = br#"{"version":2,"papers":{}}"#;
+        fs::write(library_index_path(&library), future_index)
+            .expect("将来版indexを作成");
+        scan_library(library.to_string_lossy().to_string())
+            .expect("将来版indexでも走査");
+        assert_eq!(
+            fs::read(library_index_path(&library)).expect("将来版indexを再読込"),
+            future_index
+        );
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn frontmatter_identity_overrides_a_stale_index_without_rewriting_the_note() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-frontmatter");
+        fs::write(library.join("Inbox/frontmatter.pdf"), b"%PDF-1.4\nfrontmatter\n")
+            .expect("PDFを作成");
+        let initial = scan_library(library.to_string_lossy().to_string())
+            .expect("初回走査")
+            .remove(0);
+        let new_id = Uuid::new_v4().to_string();
+        let note_path = library.join(&initial.note_path);
+        let note = fs::read_to_string(&note_path).expect("noteを読込");
+        let externally_changed = note.replace(&initial.id, &new_id);
+        fs::write(&note_path, &externally_changed).expect("frontmatter ID変更を模擬");
+
+        let rescanned = scan_library(library.to_string_lossy().to_string())
+            .expect("ID矛盾を再走査")
+            .remove(0);
+
+        assert_eq!(rescanned.id, new_id);
+        assert_eq!(
+            fs::read_to_string(&note_path).expect("noteを再読込"),
+            externally_changed
+        );
+        let index = load_library_index(&library).0;
+        assert!(index.papers.contains_key(&new_id));
+        assert!(!index.papers.contains_key(&initial.id));
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
+    fn duplicate_frontmatter_ids_do_not_rewrite_notes() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-index-duplicate-id");
+        fs::write(library.join("Inbox/first.pdf"), b"%PDF-1.4\nfirst\n")
+            .expect("first PDFを作成");
+        fs::write(library.join("Inbox/second.pdf"), b"%PDF-1.4\nsecond\n")
+            .expect("second PDFを作成");
+        let initial = scan_library(library.to_string_lossy().to_string())
+            .expect("初回走査");
+        let first = initial
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("first.pdf"))
+            .expect("first文献");
+        let second = initial
+            .iter()
+            .find(|paper| paper.pdf_path.ends_with("second.pdf"))
+            .expect("second文献");
+        let second_note_path = library.join(&second.note_path);
+        let second_note = fs::read_to_string(&second_note_path).expect("second noteを読込");
+        let duplicate_note = second_note.replace(&second.id, &first.id);
+        fs::write(&second_note_path, &duplicate_note).expect("重複IDを模擬");
+        fs::remove_file(library_index_path(&library)).expect("migration状態を模擬");
+
+        let rescanned = scan_library(library.to_string_lossy().to_string())
+            .expect("重複IDを走査");
+
+        assert_eq!(rescanned.iter().filter(|paper| paper.id == first.id).count(), 2);
+        assert_eq!(
+            fs::read_to_string(&second_note_path).expect("second noteを再読込"),
+            duplicate_note
+        );
+        let index = serde_json::from_slice::<LibraryIndex>(
+            &fs::read(library_index_path(&library)).expect("indexを読込"),
+        )
+        .expect("indexを解析");
+        assert_eq!(index.papers.len(), 1);
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
 
     #[test]
     fn local_library_round_trip() {
+        let _guard = library_test_guard();
         let test_dir = std::env::temp_dir().join(format!("rill-test-{}", Uuid::new_v4()));
         let library = test_dir.join("Rill");
         let source = test_dir.join("2024_Test_Clinical_Trial.pdf");
         fs::create_dir_all(&test_dir).expect("テストフォルダを作成");
+        fs::create_dir_all(&library).expect("ライブラリの場所を作成");
+        authorize_library_root(&library).expect("テスト用ライブラリを許可");
         fs::write(&source, b"%PDF-1.4\nRill test PDF\n").expect("テストPDFを作成");
 
         initialize_library(library.to_string_lossy().to_string()).expect("ライブラリを初期化");
@@ -2081,6 +2921,7 @@ mod tests {
                 .len(),
             1
         );
+        assert!(!load_library_index(&library).0.papers.contains_key(&moved.id));
 
         let restored =
             restore_trashed_paper(library.to_string_lossy().to_string(), moved.id.clone())
@@ -2089,6 +2930,10 @@ mod tests {
         assert_eq!(restored.note_path, moved.note_path);
         assert!(library.join(&restored.pdf_path).exists());
         assert!(library.join(&restored.note_path).exists());
+        assert!(load_library_index(&library)
+            .0
+            .papers
+            .contains_key(&restored.id));
         let restored_annotations =
             load_pdf_annotations(library.to_string_lossy().to_string(), restored.id.clone())
                 .expect("復元後の注釈");
@@ -2106,6 +2951,10 @@ mod tests {
             .expect("完全削除後のゴミ箱")
             .is_empty());
         assert!(!library.join("Trash").join(&restored.id).exists());
+        assert!(!load_library_index(&library)
+            .0
+            .papers
+            .contains_key(&restored.id));
 
         fs::remove_dir_all(&test_dir).expect("テストデータを削除");
     }

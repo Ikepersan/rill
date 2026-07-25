@@ -1,6 +1,6 @@
 # Rill macOS distribution
 
-Rill 0.8.0 is the current Apple silicon preview and is bundled as `Rill.app` and a DMG.
+Rill 1.0.0 is the current Apple silicon release and is bundled as `Rill.app` and a DMG.
 
 ## Reproducible local build
 
@@ -12,12 +12,11 @@ npm run desktop:build
 Expected artifacts:
 
 - `src-tauri/target/release/bundle/macos/Rill.app`
-- `src-tauri/target/release/bundle/dmg/Rill_0.8.0_aarch64.dmg`
+- `src-tauri/target/release/bundle/dmg/Rill_1.0.0_aarch64.dmg`
 
-The repository currently uses ad hoc signing (`signingIdentity: "-"`). This is
-suitable for local validation and small test distribution, but it is not an
-Apple-notarized public release. Gatekeeper may require the recipient to approve
-the app manually.
+The default development configuration uses ad hoc signing
+(`signingIdentity: "-"`). Public artifacts must instead be built with the
+release configuration and the notarized release script described below.
 
 ## Validation
 

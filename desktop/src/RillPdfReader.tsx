@@ -98,12 +98,13 @@ async function captureAreaImage(document: PDFDocumentProxy, annotation: PdfAnnot
   return crop.toDataURL("image/jpeg", 0.84);
 }
 
-export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast }: {
+export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, onRegisterFlush }: {
   root: string;
   paper: Paper;
   onClose: () => void;
   onOpenExternal: () => void;
   onToast: (message: string) => void;
+  onRegisterFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const engineRef = useRef<IframeRillPdfEngine | null>(null);
@@ -265,6 +266,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast }:
           (message) => onToastRef.current(message),
         );
         repositoryRef.current = repository;
+        onRegisterFlush?.(() => repository.flush());
         unsubscribeRepository = repository.subscribe((state) => {
           setRepositoryState(state);
           engineRef.current?.setAnnotations(state.annotations, state.revision);
@@ -294,6 +296,9 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast }:
       unsubscribeEngine?.();
       engineRef.current?.destroy();
       engineRef.current = null;
+      const repository = repositoryRef.current;
+      if (repository) void repository.flush();
+      onRegisterFlush?.(null);
       repositoryRef.current = null;
       pdfDocumentRef.current = null;
       void loadingTask?.destroy();

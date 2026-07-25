@@ -4,18 +4,18 @@ Rill is a local-first macOS application for managing medical papers. PDFs remain
 in a user-selected local folder, while bibliographic metadata, reading notes,
 annotations, and Obsidian-compatible Markdown stay alongside the library.
 
-## Download Rill 0.8.0
+## Download Rill 1.0.0
 
-**[Rill 0.8.0 for Apple siliconをダウンロード（DMG・約9.4 MB）](https://github.com/Ikepersan/rill/releases/download/v0.8.0/Rill_0.8.0_aarch64.dmg)**
+**[Rill 1.0.0 for Apple siliconをダウンロード（DMG）](https://github.com/Ikepersan/rill/releases/download/v1.0.0/Rill_1.0.0_aarch64.dmg)**
 
 ダウンロードしたDMGを開き、`Rill.app`を`Applications`へドラッグしてください。
 この配布物はDeveloper IDで署名し、Appleのノータライズを通過しています。
 
-[リリース情報とSHA-256を確認する](https://github.com/Ikepersan/rill/releases/tag/v0.8.0)
+[リリース情報とSHA-256を確認する](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
 
-## Current preview
+## Current release
 
-Version `0.8.0` is the current pre-release preview and includes:
+Version `1.0.0` is the first public release and includes:
 
 - a native macOS menu bar with Settings, library actions, view shortcuts, and version Help
 - a calmer Overview with refined typography, quieter empty states, and user-facing storage labels
@@ -49,7 +49,7 @@ upstream commit, audited patch and rebuild script are included in this source.
 Ambiguous layouts keep the upstream reading order. If extracted lines and
 selection rectangles form a high-confidence two-column layout,
 `rillReadingOrderV2` applies a conservative left-column/right-column ordering.
-Rill 0.8.0 is intended for free preview distribution with its corresponding source;
+Rill 1.0.0 is intended for free distribution with its corresponding source;
 voluntary donations do not limit the freedoms granted by the GNU AGPLv3.
 
 ## Privacy

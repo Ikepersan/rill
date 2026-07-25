@@ -1,5 +1,8 @@
 # Rillを別のMacで再開するための引継ぎ仕様書
 
+> この文書は0.8.0時点の履歴です。1.0.0以降は公開リポジトリの
+> `main`ブランチと対応するリリースタグを基準にしてください。
+
 最終更新日は2026年7月22日です。
 
 この文書は、現在のRill macOS版の開発状態を別のMacへ復元し、同じ地点から作業を再開するための基準です。
@@ -12,7 +15,7 @@
 - 作業ブランチ: `codex/macos-release-0.8.0`
 - この文書作成前の実装基準コミット: `a0109ba Set current Rill preview version to 0.8.0`
 - 現在のバージョン: `0.8.0`
-- 現在のMac上のworktree: `/Users/user/Documents/文献管理アプリ/.worktrees/macos-release-0.8.0`
+- 当時のMac上のworktree: `/path/to/rill-worktree`
 - `master`の現在位置: `cf163b4 Release Rill 0.7.11`
 
 worktreeのパスは現在のMacだけの作業場所であり、別のMacへは引き継がれません。
@@ -60,7 +63,7 @@ git ls-remote --heads origin codex/macos-release-0.8.0
 
 最後に生成して確認に使用していたファイルは、次のDMGです。
 
-[確認用 Rill 0.8.0 DMG](/Users/user/Documents/文献管理アプリ/.worktrees/macos-release-0.8.0/src-tauri/target/release/bundle/dmg/Rill_0.8.0_aarch64.dmg)
+当時の確認用成果物は`src-tauri/target/release/bundle/dmg/Rill_0.8.0_aarch64.dmg`でした。
 
 - ファイル名: `Rill_0.8.0_aarch64.dmg`
 - 対象: Apple silicon Mac

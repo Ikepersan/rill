@@ -1,4 +1,4 @@
-# Third-party notice for Rill 0.8.0
+# Third-party notice for Rill 1.0.0
 
 Rill includes a patched, UI-free build of Zotero
 Reader's mobile `View` from commit
@@ -25,7 +25,7 @@ as the audited patch named above.
 
 The upstream Reader toolbar, selection popup, context menu, annotation sidebar,
 colors and product branding are not built into Rill. Rill provides its own visible
-reader interface and annotation repository. Rill 0.8.0 is distributed under the
+reader interface and annotation repository. Rill 1.0.0 is distributed under the
 GNU Affero General Public License version 3 (AGPLv3) with corresponding source at
-`https://github.com/Ikepersan/rill/tree/v0.8.0`. “Zotero” is used only to identify
+`https://github.com/Ikepersan/rill/tree/v1.0.0`. “Zotero” is used only to identify
 the upstream project; it is not the product name or an indication of endorsement.
