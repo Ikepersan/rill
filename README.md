@@ -1,21 +1,23 @@
 # Rill
 
-Rill is a local-first macOS application for managing medical papers. PDFs remain
-in a user-selected local folder, while bibliographic metadata, reading notes,
-annotations, and Obsidian-compatible Markdown stay alongside the library.
+Rill is a local-first macOS application for organizing, reading, and citing
+medical papers. PDFs remain in a folder you choose, while bibliographic
+metadata, reading notes, annotations, and Obsidian-compatible Markdown stay
+alongside your library.
 
-## Download Rill 1.0.0
+## Download
 
-**[Rill 1.0.0 for Apple siliconをダウンロード（DMG）](https://github.com/Ikepersan/rill/releases/download/v1.0.0/Rill_1.0.0_aarch64.dmg)**
+**[Download Rill 1.0.0 for Apple silicon (DMG)](https://github.com/Ikepersan/rill/releases/download/v1.0.0/Rill_1.0.0_aarch64.dmg)**
 
-ダウンロードしたDMGを開き、`Rill.app`を`Applications`へドラッグしてください。
-この配布物はDeveloper IDで署名し、Appleのノータライズを通過しています。
+Open the downloaded DMG and drag `Rill.app` into `Applications`.
+The distribution is signed with a Developer ID certificate and notarized by
+Apple.
 
-[リリース情報とSHA-256を確認する](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
+[View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
 
 ## Current release
 
-Version `1.0.0` is the first public release and includes:
+Version `1.0.0` is the first stable public release and includes:
 
 - a native macOS menu bar with Settings, library actions, view shortcuts, and version Help
 - a calmer Overview with refined typography, quieter empty states, and user-facing storage labels
@@ -40,17 +42,21 @@ Version `1.0.0` is the first public release and includes:
 
 ## PDF reader engine
 
-Rill's visible reader uses its original toolbar, five-color selection menu and
-Reading Notes UI. A patched, UI-free
-build of Zotero Reader's mobile `View` is used only for PDF rendering,
-structured characters, reading order and selection geometry. Rill remains the
-single owner of annotation state, JSON and Markdown persistence. The fixed
-upstream commit, audited patch and rebuild script are included in this source.
-Ambiguous layouts keep the upstream reading order. If extracted lines and
-selection rectangles form a high-confidence two-column layout,
-`rillReadingOrderV2` applies a conservative left-column/right-column ordering.
-Rill 1.0.0 is intended for free distribution with its corresponding source;
-voluntary donations do not limit the freedoms granted by the GNU AGPLv3.
+Rill's visible reader uses its own toolbar, five-color selection menu, and
+Reading Notes interface. A patched, UI-free build of Zotero Reader's mobile
+`View` is used only for PDF rendering, structured characters, reading order,
+and selection geometry. Rill remains the sole owner of annotation state and
+JSON/Markdown persistence.
+
+The pinned upstream commit, audited patch, and reproducible build script are
+included in this repository. Ambiguous layouts retain the upstream reading
+order. When extracted lines and selection rectangles form a high-confidence
+two-column layout, `rillReadingOrderV2` applies a conservative left-column then
+right-column order.
+
+Rill 1.0.0 is distributed free of charge with corresponding source code under
+the GNU AGPLv3. Voluntary donations do not limit the freedoms granted by the
+license.
 
 ## Privacy
 
@@ -58,7 +64,7 @@ Rill library data is not stored in this repository. PDF files, `.rill` metadata,
 Obsidian configuration, exported reference files, and local databases are
 explicitly excluded by `.gitignore`.
 
-Do not commit copyrighted papers, patient information, personal reading notes,
+Do not commit copyrighted papers, patient information, private reading notes,
 API credentials, or an Obsidian Vault to this repository.
 
 ## Development
@@ -75,14 +81,14 @@ npm run desktop:frontend:build
 npm run desktop:build
 ```
 
-Run the desktop app in development with:
+Run the desktop application in development with:
 
 ```bash
 npm run desktop:dev
 ```
 
-The Tauri backend is under `src-tauri/`; the React desktop interface is under
-`desktop/`. The earlier web prototype remains under `app/` for reference.
+The Tauri backend is in `src-tauri/`, and the React desktop interface is in
+`desktop/`. The earlier web prototype remains in `app/` for reference.
 
 Release numbering and the manifests that must stay aligned are documented in
 [`docs/VERSIONING.md`](docs/VERSIONING.md).
