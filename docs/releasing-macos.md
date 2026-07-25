@@ -1,6 +1,6 @@
 # Rill macOS release
 
-Rill 0.8.0の確認用ビルドと、将来の署名済み配布用ビルドを分離する。
+Rill 1.0.0のローカル確認用ビルドと、署名済み配布用ビルドを分離する。
 
 ## 一度だけ行う準備
 
@@ -39,4 +39,4 @@ npm run desktop:build
 
 ## バージョン
 
-現在の開発プレビューは `0.8.0` とし、細かな修正と配布検証を終えた段階で最初の正式公開版 `1.0.0` へ上げる。`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` の3か所を同じ値に保つ。リリース用worktree／ブランチも `macos-release-0.8.0` 系の名前に揃える。
+現在の正式公開候補は `1.0.0` とする。`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` の3か所を同じ値に保ち、公開タグは署名・ノータライズ・実アプリ検証がすべて通った最終コミットへ付ける。

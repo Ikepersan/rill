@@ -124,10 +124,10 @@ test("reader lifecycle stays mounted and dismisses the Rill popup explicitly", a
   assert.doesNotMatch(bundle, /finalizeSelection: \(\) => view\.finalizeSelection\(\)/);
 });
 
-test("the current macOS preview is Rill 0.8.0", async () => {
+test("the current macOS release is Rill 1.0.0", async () => {
   const config = JSON.parse(await read("src-tauri/tauri.conf.json"));
   assert.equal(config.productName, "Rill");
-  assert.equal(config.version, "0.8.0");
+  assert.equal(config.version, "1.0.0");
   assert.equal(config.identifier, "app.rill.library");
 });
 
@@ -145,9 +145,9 @@ test("bundled engine records source, patch, licenses and fixed commits", async (
   const commit = "c12c65e3f01414ae244f6102da4028c700cf6584";
   const pdfjsCommit = "f57fc80d1c07e4cdc50a767ae0b500b5272123b4";
   assert.match(license, /AGPL-3\.0-only/);
-  assert.match(releaseNotice, /Rill 0\.8\.0/);
-  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v0\.8\.0/);
-  assert.match(notice, /Rill 0\.8\.0/);
+  assert.match(releaseNotice, /Rill 1\.0\.0/);
+  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v1\.0\.0/);
+  assert.match(notice, /Rill 1\.0\.0/);
   assert.doesNotMatch(notice, /Rill 0\.7\.11/);
   assert.match(notice, /modified for Rill on 2026-07-19/);
   assert.match(notice, new RegExp(commit));

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import CSL from "citeproc";
 import cslStyles from "@citation-js/plugin-csl/lib/styles.json";
 import cslLocales from "@citation-js/plugin-csl/lib/locales.json";
@@ -78,6 +78,16 @@ type CitationOptions = {
   hangingIndent: boolean;
 };
 type CitationPreset = { id: string; name: string; options: CitationOptions };
+
+function RillMark({ size = "small" }: { size?: "small" | "regular" | "large" }) {
+  return (
+    <span className={`rill-mark ${size}`} aria-hidden="true">
+      <svg viewBox="0 0 32 32">
+        <path d="M6 8c10 0 10 8 2 8s0 8 18 8" />
+      </svg>
+    </span>
+  );
+}
 
 const defaultCitationOptions: CitationOptions = {
   numbering: "none",
@@ -404,27 +414,49 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [pdfAvailability, setPdfAvailability] = useState<Record<string, boolean>>({});
   const draftDirty = useRef(false);
+  const draftRef = useRef<Paper | null>(null);
+  const draftRevision = useRef(0);
+  const latestRevisionByPaper = useRef(new Map<string, number>());
+  const queuedRevisionByPaper = useRef(new Map<string, number>());
+  const draftSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const draftSaveError = useRef<unknown>(null);
+  const autoSaveTimer = useRef(0);
+  const readerFlush = useRef<(() => Promise<void>) | null>(null);
+  const closingAfterFlush = useRef(false);
   const lastSelectedId = useRef<string | null>(null);
   const pointerDrag = useRef<{ paperId: string; paperIds: string[]; startX: number; startY: number; active: boolean } | null>(null);
   const suppressRowClick = useRef(false);
 
   const selected = papers.find((paper) => paper.id === selectedId) ?? null;
   const readerPaper = papers.find((paper) => paper.id === readerPaperId) ?? null;
+  draftRef.current = draft;
 
   useEffect(() => {
     if (!isTauri) {
       setRoot("/Users/you/Google Drive/Rill");
       return;
     }
-    const readerLabDefaultRoot = (import.meta.env.VITE_RILL_READER_LAB_ROOT as string | undefined)?.trim() ?? "";
-    const savedRoot = localStorage.getItem("rill-library-root") || readerLabDefaultRoot;
-    if (!savedRoot) {
-      setReady(true);
-      return;
+    async function restoreRoot() {
+      try {
+        const readerLabDefaultRoot = (import.meta.env.VITE_RILL_READER_LAB_ROOT as string | undefined)?.trim() ?? "";
+        const legacyRoot = localStorage.getItem("rill-library-root") || readerLabDefaultRoot;
+        const restored = await invoke<string | null>("restore_library_root");
+        const authorized = restored || (legacyRoot
+          ? await invoke<string | null>("migrate_library_root", { root: legacyRoot })
+          : null);
+        if (!authorized) {
+          setReady(true);
+          return;
+        }
+        localStorage.setItem("rill-library-root", authorized);
+        setRoot(authorized);
+        await loadLibrary(authorized, false);
+      } catch (error) {
+        setToast(String(error));
+        setReady(true);
+      }
     }
-    if (!localStorage.getItem("rill-library-root")) localStorage.setItem("rill-library-root", savedRoot);
-    setRoot(savedRoot);
-    void loadLibrary(savedRoot, false);
+    void restoreRoot();
   }, []);
 
   useEffect(() => {
@@ -439,6 +471,7 @@ export default function App() {
       if (payload === "overview") setView("overview");
       if (payload === "library") setView("library");
       if (payload === "references") setView("references");
+      if (payload === "quit") void requestAppQuit();
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stopListening = unlisten;
@@ -515,9 +548,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    draftDirty.current = false;
+    const selectionChanged = lastSelectedId.current !== selectedId;
+    if (selectionChanged) {
+      const previousDraft = draftRef.current;
+      if (previousDraft && draftDirty.current) {
+        const revision = latestRevisionByPaper.current.get(previousDraft.id) ?? draftRevision.current;
+        void enqueueDraftSave(previousDraft, revision).catch(() => undefined);
+      }
+      lastSelectedId.current = selectedId;
+      const next = selected ? { ...selected, authors: [...selected.authors], tags: [...selected.tags] } : null;
+      draftDirty.current = false;
+      draftRef.current = next;
+      setSaveState("保存済み");
+      setDraft(next);
+      return;
+    }
+    if (draftDirty.current) return;
+    const next = selected ? { ...selected, authors: [...selected.authors], tags: [...selected.tags] } : null;
+    draftRef.current = next;
     setSaveState("保存済み");
-    setDraft(selected ? { ...selected, authors: [...selected.authors], tags: [...selected.tags] } : null);
+    setDraft(next);
   }, [selectedId, papers]);
 
   useEffect(() => {
@@ -540,25 +590,30 @@ export default function App() {
   useEffect(() => {
     if (!draft || !draftDirty.current) return;
     setSaveState("入力中…");
-    const timeout = window.setTimeout(async () => {
-      if (!isTauri) {
-        setPapers((current) => current.map((paper) => (paper.id === draft.id ? draft : paper)));
-        draftDirty.current = false;
-        setSaveState("保存済み");
-        return;
-      }
-      try {
-        const saved = await invoke<Paper>("save_paper", { root, paper: draft });
-        draftDirty.current = false;
-        setPapers((current) => current.map((paper) => (paper.id === saved.id ? saved : paper)));
-        setSaveState("保存済み");
-      } catch (error) {
-        setSaveState("保存エラー");
-        setToast(String(error));
-      }
+    window.clearTimeout(autoSaveTimer.current);
+    const revision = latestRevisionByPaper.current.get(draft.id) ?? draftRevision.current;
+    autoSaveTimer.current = window.setTimeout(() => {
+      void enqueueDraftSave(draft, revision).catch(() => undefined);
     }, 900);
-    return () => window.clearTimeout(timeout);
+    return () => window.clearTimeout(autoSaveTimer.current);
   }, [draft, root]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      if (!disposed) void requestAppQuit();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => setToast(String(error)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [root]);
 
   useEffect(() => {
     if (!isTauri || !root || view === "reader") return;
@@ -777,11 +832,16 @@ export default function App() {
       setToast("MacアプリではFinderからフォルダを選べます");
       return;
     }
-    const selectedFolder = await open({ directory: true, multiple: false, title: "Rillライブラリを選択" });
-    if (!selectedFolder || Array.isArray(selectedFolder)) return;
-    localStorage.setItem("rill-library-root", selectedFolder);
-    setRoot(selectedFolder);
-    await loadLibrary(selectedFolder);
+    try {
+      await flushPendingEdits();
+      const selectedFolder = await invoke<string | null>("choose_library_root");
+      if (!selectedFolder) return;
+      localStorage.setItem("rill-library-root", selectedFolder);
+      setRoot(selectedFolder);
+      await loadLibrary(selectedFolder);
+    } catch (error) {
+      setToast(String(error));
+    }
   }
 
   async function importPdfs() {
@@ -802,10 +862,9 @@ export default function App() {
 
   async function importCitationStyle() {
     if (!isTauri) { setToast("Macアプリでは.cslファイルを追加できます"); return; }
-    const selectedFile = await open({ multiple: false, directory: false, title: "CSL引用スタイルを追加", filters: [{ name: "Citation Style Language", extensions: ["csl"] }] });
-    if (!selectedFile || Array.isArray(selectedFile)) return;
     try {
-      const style = await invoke<CslStyleFile>("read_csl_style", { path: selectedFile });
+      const style = await invoke<CslStyleFile | null>("read_csl_style");
+      if (!style) return;
       customCslStyleMap.set(style.name, style.xml);
       const next = [...customCitationStyles.filter((item) => item.name !== style.name), style];
       setCustomCitationStyles(next); localStorage.setItem("rill-csl-styles", JSON.stringify(next)); setCitationStyle(`custom:${style.name}`); setToast(`${style.name}を引用スタイルへ追加しました`);
@@ -836,22 +895,79 @@ export default function App() {
     }
   }
 
+  function enqueueDraftSave(snapshot: Paper, revision: number) {
+    const queuedRevision = queuedRevisionByPaper.current.get(snapshot.id) ?? -1;
+    if (queuedRevision >= revision) return draftSaveQueue.current;
+    queuedRevisionByPaper.current.set(snapshot.id, revision);
+    const operation = draftSaveQueue.current.then(async () => {
+      try {
+        const saved = isTauri
+          ? await invoke<Paper>("save_paper", { root, paper: snapshot })
+          : snapshot;
+        draftSaveError.current = null;
+        if ((latestRevisionByPaper.current.get(saved.id) ?? revision) !== revision) return;
+        setPapers((current) => current.map((paper) => (paper.id === saved.id ? saved : paper)));
+        if (draftRef.current?.id === saved.id) {
+          draftDirty.current = false;
+          draftRef.current = saved;
+          setDraft(saved);
+          setSaveState("保存済み");
+        }
+      } catch (error) {
+        draftSaveError.current = error;
+        if (
+          draftRef.current?.id === snapshot.id
+          && (latestRevisionByPaper.current.get(snapshot.id) ?? revision) === revision
+        ) {
+          draftDirty.current = true;
+          setSaveState("保存エラー");
+          setToast(String(error));
+        }
+        throw error;
+      } finally {
+        if (queuedRevisionByPaper.current.get(snapshot.id) === revision) {
+          queuedRevisionByPaper.current.delete(snapshot.id);
+        }
+      }
+    });
+    draftSaveQueue.current = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async function flushPendingEdits() {
+    window.clearTimeout(autoSaveTimer.current);
+    const currentDraft = draftRef.current;
+    if (currentDraft && draftDirty.current) {
+      const revision = latestRevisionByPaper.current.get(currentDraft.id) ?? draftRevision.current;
+      await enqueueDraftSave(currentDraft, revision);
+    }
+    await draftSaveQueue.current;
+    await readerFlush.current?.();
+    if (draftSaveError.current) throw draftSaveError.current;
+  }
+
+  async function requestAppQuit() {
+    if (!isTauri || closingAfterFlush.current) return;
+    closingAfterFlush.current = true;
+    window.clearTimeout(autoSaveTimer.current);
+    setSaveState("終了前に保存中…");
+    try {
+      await flushPendingEdits();
+      await invoke("exit_after_flush");
+    } catch (error) {
+      closingAfterFlush.current = false;
+      setSaveState("保存エラー");
+      setToast(`保存が完了していないため終了を中止しました: ${String(error)}`);
+    }
+  }
+
   async function saveDraft() {
     if (!draft) return;
-    if (!isTauri) {
-      setPapers((current) => current.map((paper) => (paper.id === draft.id ? draft : paper)));
-      draftDirty.current = false;
-      setSaveState("保存済み");
-      setToast("Markdownへ保存しました（プレビュー）");
-      return;
-    }
     setBusy(true);
     try {
-      const saved = await invoke<Paper>("save_paper", { root, paper: draft });
-      draftDirty.current = false;
-      setPapers((current) => current.map((paper) => (paper.id === saved.id ? saved : paper)));
-      setSaveState("保存済み");
-      setToast("Markdownへ保存しました");
+      const revision = latestRevisionByPaper.current.get(draft.id) ?? draftRevision.current;
+      await enqueueDraftSave(draft, revision);
+      setToast(isTauri ? "Markdownへ保存しました" : "Markdownへ保存しました（プレビュー）");
     } catch (error) {
       setToast(String(error));
     } finally {
@@ -860,7 +976,10 @@ export default function App() {
   }
 
   function updateDraft(paper: Paper) {
+    draftRevision.current += 1;
+    latestRevisionByPaper.current.set(paper.id, draftRevision.current);
     draftDirty.current = true;
+    draftRef.current = paper;
     setDraft(paper);
   }
 
@@ -870,13 +989,19 @@ export default function App() {
       setToast("MacアプリではCrossref・PubMedから取得します");
       return;
     }
+    const requestedPaper = { ...draft, authors: [...draft.authors], tags: [...draft.tags] };
+    const requestedRevision = latestRevisionByPaper.current.get(requestedPaper.id) ?? draftRevision.current;
     setBusy(true);
     try {
-      const enriched = await invoke<Paper>("enrich_metadata", { root, paper: draft });
-      draftDirty.current = false;
-      setDraft(enriched);
-      setPapers((current) => current.map((paper) => (paper.id === enriched.id ? enriched : paper)));
-      setSaveState("保存済み");
+      const enriched = await invoke<Paper>("enrich_metadata", { root, paper: requestedPaper });
+      const currentRevision = latestRevisionByPaper.current.get(requestedPaper.id) ?? requestedRevision;
+      if (currentRevision !== requestedRevision || draftRef.current?.id !== requestedPaper.id) {
+        setToast("取得中に行った編集を優先し、書誌情報は反映しませんでした");
+        return;
+      }
+      updateDraft(enriched);
+      const enrichedRevision = latestRevisionByPaper.current.get(enriched.id) ?? draftRevision.current;
+      await enqueueDraftSave(enriched, enrichedRevision);
       setToast("書誌情報を取得しました");
     } catch (error) {
       setToast(String(error));
@@ -1051,23 +1176,48 @@ export default function App() {
       return;
     }
     setBusy(true);
-    const enrichedPapers: Paper[] = [];
+    const savedPapers: Paper[] = [];
     let failedCount = 0;
+    let skippedEditedCount = 0;
     for (const [index, paper] of targets.entries()) {
       setToast(`書誌情報を取得中… ${index + 1}/${targets.length}`);
       try {
-        enrichedPapers.push(await invoke<Paper>("enrich_metadata", { root, paper }));
+        const currentDraft = draftRef.current?.id === paper.id ? draftRef.current : null;
+        const requestedPaper = currentDraft
+          ? { ...currentDraft, authors: [...currentDraft.authors], tags: [...currentDraft.tags] }
+          : paper;
+        const requestedRevision = currentDraft
+          ? latestRevisionByPaper.current.get(paper.id) ?? draftRevision.current
+          : null;
+        const enriched = await invoke<Paper>("enrich_metadata", { root, paper: requestedPaper });
+        if (requestedRevision !== null) {
+          const currentRevision = latestRevisionByPaper.current.get(paper.id) ?? requestedRevision;
+          if (currentRevision !== requestedRevision || draftRef.current?.id !== paper.id) {
+            skippedEditedCount += 1;
+            continue;
+          }
+          updateDraft(enriched);
+          const enrichedRevision = latestRevisionByPaper.current.get(enriched.id) ?? draftRevision.current;
+          await enqueueDraftSave(enriched, enrichedRevision);
+        } else {
+          savedPapers.push(await invoke<Paper>("save_paper", { root, paper: enriched }));
+        }
       } catch {
         failedCount += 1;
       }
     }
-    if (enrichedPapers.length > 0) {
-      setPapers((current) => current.map((paper) => enrichedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(enrichedPapers.find((paper) => paper.id === draft.id) ?? draft);
+    if (savedPapers.length > 0) {
+      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
     }
     setBusy(false);
-    if (failedCount === 0) setToast(`${enrichedPapers.length}件の書誌情報を取得しました`);
-    else setToast(`${enrichedPapers.length}件を取得、${failedCount}件は候補を特定できませんでした`);
+    const savedCount = targets.length - failedCount - skippedEditedCount;
+    if (skippedEditedCount > 0) {
+      setToast(`${savedCount}件を取得。編集中の${skippedEditedCount}件は変更を優先し、反映しませんでした`);
+    } else if (failedCount === 0) {
+      setToast(`${savedCount}件の書誌情報を取得しました`);
+    } else {
+      setToast(`${savedCount}件を取得、${failedCount}件は候補を特定できませんでした`);
+    }
   }
 
   async function markSelectedPapersAsRead(paperIds = Array.from(selectedIds)) {
@@ -1608,7 +1758,7 @@ export default function App() {
   }
 
   if (!ready) {
-    return <main className="splash"><div className="rill-mark">R</div><p>ライブラリを読み込んでいます…</p></main>;
+    return <main className="splash"><RillMark size="regular" /><p>ライブラリを読み込んでいます…</p></main>;
   }
 
   if (isTauri && !root) {
@@ -1617,17 +1767,13 @@ export default function App() {
         <main className="onboarding">
           <div className="onboarding-drag" data-tauri-drag-region />
           <section className="onboarding-card">
-            <div className="rill-mark large">R</div>
-            <p className="eyebrow">LOCAL-FIRST LITERATURE LIBRARY</p>
+            <RillMark size="large" />
             <h1>文献を、自分のフォルダへ。</h1>
-            <p className="onboarding-copy">
-              RillはPDFとMarkdownをMac上で管理します。Googleアカウントも保存サーバーも必要ありません。
-            </p>
+            <p className="onboarding-copy">はじめに、文献を保存するフォルダを選びます。</p>
             <div className="folder-preview">
               <span>Rill</span><i>/</i><span>Inbox</span><span>Papers</span><span>Notes</span>
             </div>
             <button className="primary-action" type="button" onClick={chooseLibrary}>ライブラリフォルダを選ぶ</button>
-            <small>Google Drive、iCloud Drive、通常のフォルダから選べます</small>
           </section>
         </main>
         {showSettings && <SettingsDialog root={root} obsidianConnected={false} onClose={() => setShowSettings(false)} onChooseRoot={() => void chooseLibrary()} onOpenRoot={() => {}} onObsidianSetup={() => setShowObsidianSetup(true)} />}
@@ -1638,7 +1784,7 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="titlebar" data-tauri-drag-region onMouseDown={startWindowDrag}>
-        <div className="brand" data-tauri-drag-region><span className="rill-mark small">R</span><strong>Rill</strong></div>
+        <div className="brand" data-tauri-drag-region><RillMark /><strong>Rill</strong></div>
         <nav className="view-tabs" aria-label="表示切り替え">
           <button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}>Overview</button>
           <button className={view === "library" || view === "reader" ? "active" : ""} onClick={() => setView("library")}>Library</button>
@@ -1671,7 +1817,14 @@ export default function App() {
       )}
 
       {view === "reader" && readerPaper ? (
-        <RillPdfReader root={root} paper={readerPaper} onClose={() => setView("library")} onOpenExternal={() => void openPaperExternal(readerPaper)} onToast={setToast} />
+        <RillPdfReader
+          root={root}
+          paper={readerPaper}
+          onClose={() => setView("library")}
+          onOpenExternal={() => void openPaperExternal(readerPaper)}
+          onToast={setToast}
+          onRegisterFlush={(flush) => { readerFlush.current = flush; }}
+        />
       ) : view === "overview" ? (
         <Overview
           papers={papers}
@@ -1986,7 +2139,7 @@ function SettingsDialog({ root, obsidianConnected, onClose, onChooseRoot, onOpen
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="folder-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="settings-header">
-          <span className="rill-mark small">R</span>
+          <RillMark />
           <div><h2 id="settings-title">設定</h2><p>Rillの保存場所と連携を管理します。</p></div>
           <button className="settings-close" type="button" aria-label="設定を閉じる" onClick={onClose}>×</button>
         </header>
@@ -2147,14 +2300,19 @@ async function copyCitation(text: string, html: string) {
 }
 
 function CitationEditor({ options, disabled, previewPaper, presetName, onRenamePreset, onOptionsChange, onCreatePreset, onDuplicatePreset, onDeletePreset, onExportPreset, onImport }: {
-  options: CitationOptions; disabled: boolean; previewPaper: Paper; presetName?: string; onRenamePreset: (name: string) => void; onOptionsChange: (options: CitationOptions) => void; onCreatePreset: () => void; onDuplicatePreset: () => void; onDeletePreset: () => void; onExportPreset: () => void; onImport: () => void;
+  options: CitationOptions; disabled: boolean; previewPaper: Paper; presetName?: string; onRenamePreset: (name: string) => string; onOptionsChange: (options: CitationOptions) => void; onCreatePreset: () => void; onDuplicatePreset: () => void; onDeletePreset: () => void; onExportPreset: () => void; onImport: () => void;
 }) {
   const set = (next: Partial<CitationOptions>) => onOptionsChange({ ...options, ...next });
   const previewParts = formatReferenceParts(previewPaper, 1, "preset:preview", options);
   const preview = [previewParts.number, previewParts.citation].filter(Boolean).join(" ");
+  const [presetNameDraft, setPresetNameDraft] = useState(presetName ?? "");
   const [copyState, setCopyState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
   const copyTimeout = useRef<number | null>(null);
+  useEffect(() => setPresetNameDraft(presetName ?? ""), [presetName]);
   const radio = <T extends string>(label: string, value: T, current: T, update: (value: T) => void) => <label className="editor-choice"><input type="radio" checked={current === value} onChange={() => update(value)} /><span>{label}</span></label>;
+  function commitPresetName() {
+    setPresetNameDraft(onRenamePreset(presetNameDraft));
+  }
   async function copyPreview() {
     if (copyState === "copying") return;
     setCopyState("copying");
@@ -2164,7 +2322,7 @@ function CitationEditor({ options, disabled, previewPaper, presetName, onRenameP
     copyTimeout.current = window.setTimeout(() => setCopyState("idle"), copied ? 1800 : 2600);
   }
   return <section className="csl-editor" aria-label="CSL Editor">
-    <div className="csl-editor-head"><div><small>CSL Editor</small>{presetName ? <input className="preset-name-input" aria-label="テンプレート名" value={presetName} onChange={(event) => onRenamePreset(event.target.value)} /> : <h2>カスタム引用テンプレート</h2>}<p>Rillに保存済みの書誌情報だけを使い、出力の見た目を整えます。</p></div><div><button type="button" onClick={onCreatePreset}>新規テンプレート</button>{presetName && <><button type="button" onClick={onDuplicatePreset}>複製</button><button type="button" className="delete-preset" onClick={onDeletePreset}>削除</button></>}<button type="button" onClick={onImport}>JSONを読み込む</button><button type="button" onClick={onExportPreset}>JSONを書き出す</button></div></div>
+    <div className="csl-editor-head"><div><small>CSL Editor</small>{presetName ? <input className="preset-name-input" aria-label="テンプレート名" value={presetNameDraft} onChange={(event) => setPresetNameDraft(event.target.value)} onBlur={commitPresetName} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /> : <h2>カスタム引用テンプレート</h2>}<p>Rillに保存済みの書誌情報だけを使い、出力の見た目を整えます。</p></div><div><button type="button" onClick={onCreatePreset}>新規テンプレート</button>{presetName && <><button type="button" onClick={onDuplicatePreset}>複製</button><button type="button" className="delete-preset" onClick={onDeletePreset}>削除</button></>}<button type="button" onClick={onImport}>JSONを読み込む</button><button type="button" onClick={onExportPreset}>JSONを書き出す</button></div></div>
     <div className="csl-editor-grid"><fieldset className="csl-settings" disabled={disabled}>
       {!disabled ? <><h3>フォーマット設定</h3>
         <div className="editor-group"><div className="editor-group-title"><strong>番号</strong></div><label>表記<select value={options.numbering} onChange={(event) => set({ numbering: event.target.value as CitationOptions["numbering"] })}><option value="none">なし</option><option value="period">1.</option><option value="brackets">[1]</option></select></label><small className="editor-help">Referencesの並び順をそのまま使います。</small></div>
@@ -2301,8 +2459,16 @@ function ReferencesView({ papers, style, options, busy, customStyles, presets, o
   }
 
   function renamePreset(name: string) {
-    if (!isPresetStyle(style) || !name.trim()) return;
-    const presetId = style.slice(7); savePresets(presets.map((preset) => preset.id === presetId ? { ...preset, name: name.trim() } : preset));
+    if (!isPresetStyle(style)) return name.trim();
+    const presetId = style.slice(7);
+    const presetIndex = presets.findIndex((preset) => preset.id === presetId);
+    if (presetIndex < 0) return name.trim();
+    const usedNames = new Set(presets.filter((preset) => preset.id !== presetId).map((preset) => preset.name));
+    let fallbackIndex = presetIndex + 1;
+    while (usedNames.has(`新しいテンプレート ${fallbackIndex}`)) fallbackIndex += 1;
+    const nextName = name.trim() || `新しいテンプレート ${fallbackIndex}`;
+    savePresets(presets.map((preset) => preset.id === presetId ? { ...preset, name: nextName } : preset));
+    return nextName;
   }
 
   async function exportPreset() {
@@ -2310,9 +2476,9 @@ function ReferencesView({ papers, style, options, busy, customStyles, presets, o
     if (!preset) return;
     const content = JSON.stringify({ version: 1, preset }, null, 2);
     if (isTauri) {
-      const path = await save({ title: "引用テンプレートを書き出す", defaultPath: `${preset.name}.rill-citation.json`, filters: [{ name: "Rill Citation Template", extensions: ["json"] }] });
-      if (!path) return;
-      await invoke("write_citation_preset", { path, content }); onToast(`「${preset.name}」をJSONで書き出しました`); return;
+      const written = await invoke<boolean>("write_citation_preset", { content, suggestedName: `${preset.name}.rill-citation.json` });
+      if (!written) return;
+      onToast(`「${preset.name}」をJSONで書き出しました`); return;
     }
     const blob = new Blob([content], { type: "application/json" });
     const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${preset.name}.rill-citation.json`; anchor.click(); URL.revokeObjectURL(url);
@@ -2331,9 +2497,10 @@ function ReferencesView({ papers, style, options, busy, customStyles, presets, o
   async function importPreset(file: File) { await addImportedPreset(await file.text()); }
 
   async function importPresetFromMac() {
-    const path = await open({ multiple: false, directory: false, title: "引用テンプレートJSONを読み込む", filters: [{ name: "Rill Citation Template", extensions: ["json"] }] });
-    if (!path || Array.isArray(path)) return;
-    try { await addImportedPreset(await invoke<string>("read_citation_preset", { path })); } catch (error) { onToast(String(error)); }
+    try {
+      const content = await invoke<string | null>("read_citation_preset");
+      if (content) await addImportedPreset(content);
+    } catch (error) { onToast(String(error)); }
   }
 
   return (

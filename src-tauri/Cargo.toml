@@ -1,6 +1,6 @@
 [package]
 name = "rill"
-version = "0.8.0"
+version = "1.0.0"
 description = "A calm, local-first medical literature library"
 authors = ["Rill"]
 license = "AGPL-3.0-only"

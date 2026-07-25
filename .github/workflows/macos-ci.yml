@@ -1,0 +1,49 @@
+name: macOS quality gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/rill-release-*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Desktop contract tests
+        run: npm run test:desktop
+
+      - name: Desktop frontend build
+        run: npm run desktop:frontend:build
+
+      - name: Lint
+        run: npm run lint -- --quiet
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Rust check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify release metadata and bundled reader provenance
+        run: node --test tests/macos-menu-contract.test.mjs tests/rill-reader-contract.test.mjs

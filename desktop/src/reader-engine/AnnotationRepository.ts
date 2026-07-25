@@ -66,7 +66,12 @@ export class AnnotationRepository {
     const snapshot = this.snapshot;
     this.state = { ...this.state, status: "saving", error: undefined };
     this.emit();
-    this.enqueueSave(snapshot, message);
+    return this.enqueueSave(snapshot, message);
+  }
+
+  flush() {
+    if (this.state.status === "dirty") return this.commit();
+    return this.saveQueue;
   }
 
   private enqueueSave(snapshot: PdfAnnotation[], message?: string) {
@@ -93,6 +98,7 @@ export class AnnotationRepository {
         this.onMessage(`保存できなかったため直前の状態へ戻しました: ${String(error)}`);
       }
     });
+    return this.saveQueue;
   }
 
   private emit() {

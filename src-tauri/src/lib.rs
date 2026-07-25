@@ -1,13 +1,28 @@
 mod library;
 mod menu;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter, RunEvent};
+
+static ALLOW_EXIT_AFTER_FLUSH: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn exit_after_flush(app: AppHandle) {
+    ALLOW_EXIT_AFTER_FLUSH.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .menu(menu::build)
         .on_menu_event(|app, event| menu::handle(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
+            exit_after_flush,
+            library::restore_library_root,
+            library::migrate_library_root,
+            library::choose_library_root,
             library::initialize_library,
             library::scan_library,
             library::search_library,
@@ -39,6 +54,15 @@ pub fn run() {
             library::open_obsidian_app,
             library::open_note_in_obsidian,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("Rillの起動に失敗しました");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { api, .. } = event {
+            if !ALLOW_EXIT_AFTER_FLUSH.load(Ordering::SeqCst) {
+                api.prevent_exit();
+                let _ = app_handle.emit("rill://menu-action", "quit");
+            }
+        }
+    });
 }
