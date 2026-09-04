@@ -1,36 +1,49 @@
-# Zotero Reader / PDF.js エンジン解析ノート
+# Zotero Reader / PDF.js Engine Analysis Notes
 
-> **Rill 0.8.0 の実装について** これは開発時の分析記録である。Rill
-> 0.8.0 は、Zotero Reader の表示UIを使用せず、AGPLv3に基づいてその一部を
-> 改変したPDF文字選択エンジンを同梱する。画面、Reading Notes、注釈管理、
-> Markdown保存はRill側の実装である。
+> **About the Rill 0.8.0 implementation:** This document is a historical
+> development analysis. Rill 0.8.0 bundles a modified PDF text-selection engine
+> derived in part from Zotero Reader and distributed under the GNU AGPLv3. It
+> does not use Zotero Reader's presentation UI. The application shell, Reading
+> Notes, annotation management, and Markdown persistence are implemented by
+> Rill.
 
-## 目的
+## Purpose
 
-Rill 0.7.8 の画面構成、色、Reading Notes、ローカル保存方式を維持しつつ、Zotero Reader の優れた文字選択と注釈操作を再現できるように、実装を機能単位へ分解する。
+Break the implementation down by capability so that Rill can reproduce Zotero
+Reader's high-quality text selection and annotation behavior while preserving
+the Rill 0.7.8 layout, colors, Reading Notes, and local-storage model.
 
-この文書でいう「再現」は、Zotero の画面や商標を複製することではない。公開ソースの挙動とデータフローを解析し、Rill の UI と保存モデルへ接続することを指す。
+In this document, "reproduce" does not mean copying Zotero's interface or
+trademarks. It means analyzing the behavior and data flow of publicly available
+source code and connecting those concepts to Rill's UI and persistence model.
 
-解析対象は次のリビジョンで固定する。
+The analysis is pinned to the following revisions:
 
 - Zotero Reader: `c12c65e3f01414ae244f6102da4028c700cf6584`
 - Zotero PDF.js fork: `f57fc80d1c07e4cdc50a767ae0b500b5272123b4`
 - Rill PDF Viewer Lab: `codex/rill-zotero-reader-lab`
 
-## 結論
+## Conclusion
 
-Zotero の文字選択が優れている理由は、単に PDF.js を使っているからではない。
+Zotero's text selection is not effective merely because it uses PDF.js.
 
-1. PDF.js のワーカー側で、グリフごとの文字、矩形、ベースライン、回転、フォント情報を抽出する。
-2. Zotero の PDF.js fork が文字を行・単語・段落へ構造化し、安定した文字オフセットを付ける。
-3. Reader がポインタ座標を文字オフセットへ変換し、ブラウザの DOM Range とは別の選択モデルを持つ。
-4. ドラッグ中の表示は、構造化文字から生成した行矩形を独自オーバーレイとして描く。
-5. 選択確定後だけ DOM の選択範囲を同期し、コピーとアクセシビリティに利用する。
-6. 注釈は文字オフセットから得た PDF 座標で保持し、ズームや再描画後も同じ位置に復元する。
+1. The PDF.js worker extracts per-glyph characters, rectangles, baselines,
+   rotation, and font information.
+2. Zotero's PDF.js fork structures those characters into lines, words, and
+   paragraphs and assigns stable character offsets.
+3. Reader converts pointer coordinates into character offsets and maintains a
+   selection model separate from the browser's DOM Range.
+4. During dragging, it renders a custom overlay of line rectangles generated
+   from structured characters.
+5. Only after selection is finalized does it synchronize a DOM selection for
+   copying and accessibility.
+6. Annotations retain PDF coordinates derived from character offsets, allowing
+   them to be restored to the same location after zooming or rerendering.
 
-つまり、重要なのは「文字抽出」「構造化」「論理選択」「表示」「永続化」を分離している点である。
+The key design is therefore the separation of text extraction, structuring,
+logical selection, presentation, and persistence.
 
-## 全体アーキテクチャ
+## Overall Architecture
 
 ```text
 PDF bytes
@@ -56,23 +69,25 @@ PDF bytes
       -> Rill UI
 ```
 
-## 1. PDF 文字抽出層
+## 1. PDF Text-Extraction Layer
 
-主な実装:
+Primary implementation locations:
 
 - `pdf.js/src/core/evaluator.js`
 - `pdf.js/src/core/module/module.js`
 - `pdf.js/src/core/worker.js`
 - `pdf.js/src/display/api.js`
 
-### グリフから作られる文字データ
+### Character Data Produced from Glyphs
 
-Zotero fork は通常の `textContent.items[].str` に加え、各 item に `chars` を持たせる。各文字には概ね次の情報が入る。
+In addition to the standard `textContent.items[].str`, the Zotero fork adds a
+`chars` collection to each item. Each character contains approximately the
+following information:
 
 ```ts
 type RawChar = {
-  c: string;          // NFKDを使った表示・検索向け文字
-  u: string;          // 元のUnicodeをなるべく保持した文字
+  c: string;          // Display/search character normalized with NFKD
+  u: string;          // Character that preserves the original Unicode where possible
   rect: [number, number, number, number];
   fontSize: number;
   fontName: string;
@@ -85,9 +100,12 @@ type RawChar = {
 };
 ```
 
-矩形は PDF の current transformation matrix と文字の ascent / descent / advance から計算される。Type 3 フォントと縦書きにも個別処理がある。制御文字は除外し、合字や結合文字は正規化される。
+Rectangles are calculated from the PDF current transformation matrix and the
+character ascent, descent, and advance. Type 3 fonts and vertical writing have
+dedicated handling. Control characters are removed, and ligatures and combining
+characters are normalized.
 
-`Module.getPageData({ pageIndex })` は最終的に次を返す。
+`Module.getPageData({ pageIndex })` ultimately returns:
 
 ```ts
 type PageData = {
@@ -98,94 +116,124 @@ type PageData = {
 };
 ```
 
-この API が標準 PDF.js と Zotero Reader の間に追加された重要な境界である。
+This API is an important boundary added between standard PDF.js and Zotero
+Reader.
 
-## 2. 文字構造化層
+## 2. Character-Structuring Layer
 
-主な実装:
+Primary implementation locations:
 
 - `pdf.js/src/core/module/structure.js`
 - `getStructuredChars()`
 - `split()`
 
-### 重複除去
+### Deduplication
 
-OCR や印刷用 PDF では、同じ文字レイヤーが複数回含まれる場合がある。`文字 + rect` の fingerprint で同一文字を除外する。
+OCR and print-oriented PDFs can contain the same text layer more than once.
+Duplicate characters are removed using a `character + rect` fingerprint.
 
-### 行の認識
+### Line Recognition
 
-隣接文字について次を評価し、行の境界を作る。
+The following properties of adjacent characters are evaluated to determine line
+boundaries:
 
-- ベースライン差
-- 文字の進行方向が行頭へ戻ったか
-- 回転方向の変化
-- 矩形が同じ行方向に重なるか
-- drop cap のような極端な文字高
+- baseline difference
+- whether the character flow has returned to the beginning of a line
+- changes in rotation
+- overlap of rectangles along the line direction
+- extreme character height, such as a drop cap
 
-同じ行に入った文字は、回転方向に応じた視覚座標で並べ直され、bidi 処理を通る。
+Characters assigned to the same line are reordered in visual coordinates for
+their rotation and then processed for bidirectional text.
 
-### 単語の認識
+### Word Recognition
 
-Xpdf 由来の適応的な spacing threshold を使う。固定ピクセルではなく、平均フォントサイズ、隣接文字間隔、明示的スペースの分布から閾値を求める。
+The implementation uses an adaptive spacing threshold derived from Xpdf. Rather
+than relying on a fixed pixel distance, it calculates the threshold from average
+font size, gaps between adjacent characters, and the distribution of explicit
+spaces.
 
-結果として各文字に次のフラグが付く。
+Each character then receives the following flags:
 
 - `wordBreakAfter`
 - `spaceAfter`
 - `lineBreakAfter`
 - `paragraphBreakAfter`
 
-### 段落の認識
+### Paragraph Recognition
 
-行間、行高、主要フォント、インデント、上下関係を見て段落境界を推定する。インデントによる境界は保持し、偶発的な一行段落は前段落へ戻す。
+Paragraph boundaries are inferred from line spacing, line height, dominant
+fonts, indentation, and vertical relationships. Boundaries created by
+indentation are preserved, while accidental single-line paragraphs are merged
+back into the preceding paragraph.
 
-### ハイフネーション
+### Hyphenation
 
-行末の dash / hyphen は `ignorable` として扱い、引用テキストでは単語を不自然に分断しない。
+A dash or hyphen at the end of a line is marked `ignorable`, preventing quoted
+text from splitting a word unnaturally.
 
-### 行矩形
+### Line Rectangles
 
-各文字の `rect` とは別に `inlineRect` を作る。同一行の文字は共通の行高を持つため、ハイライトの一行目だけ高さや色面積が違う問題を避けられる。
+An `inlineRect` is generated in addition to each character's `rect`. Characters
+on the same line share a common line height, which prevents the first line of a
+highlight from having a different height or filled area than subsequent lines.
 
-### 安定オフセット
+### Stable Offsets
 
-構造化後に `offset` を 0 から順に付ける。このオフセットが、選択、検索、注釈、コピーの共通キーになる。
+After structuring, `offset` values are assigned sequentially from zero. These
+offsets form the shared key for selection, search, annotations, and copying.
 
-## 3. 読み順の実態
+## 3. How Reading Order Actually Works
 
-重要な注意点として、`structure.js` は同じ行の文字を視覚順へ並べ直すが、ページ全体の行を幾何学的に列分割して全面的に並べ直してはいない。
+An important qualification is that `structure.js` reorders characters within a
+line into visual order, but it does not completely reorder every line on a page
+by geometrically detecting columns.
 
-二段組みが正しく選べる PDF では、主に次の組み合わせで品質が出ている。
+For PDFs where two-column selection works correctly, quality primarily comes
+from the following combination:
 
-- PDF のコンテンツストリーム自体が本文の読み順に近い
-- 行・段落境界が文字配列に付いている
-- 選択が DOM 上の矩形横断ではなく、文字オフセットの連続範囲として進む
-- ヘッダー、フッター等を isolated text として本文選択から外す
+- the PDF content stream itself is close to the intended reading order
+- line and paragraph boundaries are attached to the character array
+- selection advances through a continuous range of character offsets rather
+  than across DOM rectangles
+- headers, footers, and similar content are excluded from body selection as
+  isolated text
 
-したがって Zotero でも、元 PDF の文字ストリーム順が壊れている場合に万能ではない。Rill でさらに安定させるには、列と本文ブロックから reading-order graph を作る補助層を追加する価値がある。
+Zotero is therefore not infallible when the source PDF has a broken text-stream
+order. Rill could improve stability further by adding a helper layer that builds
+a reading-order graph from columns and body-text blocks.
 
-## 4. 本文領域と isolated text
+## 4. Body Region and Isolated Text
 
-主な実装:
+Primary implementation locations:
 
 - `pdf.js/src/core/module/content-rect.js`
 - `Module.getProcessedData()`
 - Reader `applySelectionRangeIsolation()`
 
-前後ページの同じ高さに現れる類似行を比較し、繰り返しヘッダーやフッターを推定する。ページ番号も候補から外し、残った本文行の bounding rect を本文領域とする。
+Similar lines appearing at the same height on neighboring pages are compared to
+infer repeated headers and footers. Page numbers are also removed from the
+candidates, and the bounding rectangle of the remaining body lines becomes the
+body region.
 
-本文領域外の文字には `isolated = true` が付く。選択開始点が本文なら isolated 文字を除外し、開始点がヘッダー等なら本文を除外する。これにより、二段組み選択が DOI、誌名、ページ番号へ飛ぶ症状を抑える。
+Characters outside the body region receive `isolated = true`. If a selection
+starts in the body, isolated characters are excluded; if it starts in a header
+or similar region, body text is excluded. This suppresses the common failure in
+which a two-column selection jumps into a DOI, journal name, or page number.
 
-## 5. 選択モデル
+## 5. Selection Model
 
-主な実装:
+Primary implementation locations:
 
 - `reader/src/pdf/selection.js`
 - `reader/src/pdf/pdf-view.js`
 
-### 座標から文字オフセットへ
+### From Coordinates to Character Offsets
 
-ポインタを PDF 座標へ変換し、全文字の矩形との距離から最寄り文字を求める。文字の中心より前後どちらにいるかと回転方向を見て、caret が文字の前か後かを決める。
+Pointer coordinates are converted into PDF coordinates, then the nearest
+character is found by measuring the distance to every character rectangle. The
+character's rotation and whether the pointer lies before or after its center
+determine whether the caret belongs before or after that character.
 
 ### SelectionRange
 
@@ -205,122 +253,157 @@ type SelectionRange = {
 };
 ```
 
-選択は `anchorOffset` と `headOffset` を正本とする。ドラッグ方向を反転しても同じモデルで扱える。
+`anchorOffset` and `headOffset` are the canonical representation of a selection.
+The same model works when the drag direction is reversed.
 
-### 行矩形への変換
+### Conversion to Line Rectangles
 
-選択範囲の文字を `lineBreakAfter` ごとにまとめ、`inlineRect` を union して一行一矩形にする。ハイライトが右余白まで伸びることを防ぎ、行ごとの高さも揃う。
+Characters in the selection are grouped at each `lineBreakAfter`, and their
+`inlineRect` values are unioned into one rectangle per line. This prevents a
+highlight from extending into the right margin and keeps line heights
+consistent.
 
-### 単語・行・キーボード選択
+### Word, Line, and Keyboard Selection
 
-- ダブルクリック: `wordBreakAfter` まで拡張
-- トリプルクリック: `lineBreakAfter` まで拡張
-- Shift + 矢印: 文字オフセットを変更
-- 上下キー: 隣接行の最も近い文字へ移動
-- Shift + クリック: 既存 anchor を維持して head を更新
+- Double-click: extend through `wordBreakAfter`
+- Triple-click: extend through `lineBreakAfter`
+- Shift + Arrow: change the character offset
+- Up/Down Arrow: move to the nearest character on an adjacent line
+- Shift + Click: retain the existing anchor and update the head
 
-### 複数ページ
+### Multiple Pages
 
-ページごとに SelectionRange を持つ。注釈形式は `position.rects` と `position.nextPageRects` に正規化され、現在はテキスト注釈として隣接二ページまでを一件にまとめる。
+Each page has its own SelectionRange. Annotation positions are normalized into
+`position.rects` and `position.nextPageRects`; text annotations currently combine
+up to two adjacent pages into one annotation.
 
-## 6. なぜページ全体が青くならないか
+## 6. Why the Entire Page Does Not Turn Blue
 
-Reader はドラッグ中にブラウザ標準選択を正本にしない。
+Reader does not treat the browser's native selection as canonical while the
+pointer is being dragged.
 
-- `pdf-view.js` が capture phase で pointer / mouse event を処理する
-- `_selectionRanges` を更新する
-- `page.js` が選択矩形を custom annotation layer に描く
-- `viewer.css` の通常 `::selection` は透明
-- 選択確定時に `setTextLayerSelection()` で DOM Range を同期する
+- `pdf-view.js` handles pointer and mouse events in the capture phase
+- it updates `_selectionRanges`
+- `page.js` draws selection rectangles in a custom annotation layer
+- the normal `::selection` in `viewer.css` is transparent
+- after selection is finalized, `setTextLayerSelection()` synchronizes the DOM
+  Range
 
-DOM Range はコピーとアクセシビリティの補助であり、画面上の選択形状を決めるものではない。
+The DOM Range supports copying and accessibility; it does not determine the
+visible selection shape.
 
-## 7. 注釈描画
+## 7. Annotation Rendering
 
-主な実装:
+Primary implementation locations:
 
 - `reader/src/pdf/page.js`
 - `reader/src/pdf/lib/utilities.js`
 
-PDF キャンバスは汚さず、その上の DOM overlay に display list を描く。
+The PDF canvas is left unchanged. A display list is drawn in a DOM overlay above
+it.
 
-- highlight: 行矩形 + `mix-blend-mode: multiply`
-- underline: 文字回転に応じて行端へ細線を置く
-- note: SVG の付箋アイコン
-- image: 矩形範囲
-- ink: path
-- find result: 検索結果矩形
-- current selection: 独立した selection color
+- highlight: line rectangles + `mix-blend-mode: multiply`
+- underline: a thin line placed at the line edge according to text rotation
+- note: an SVG sticky-note icon
+- image: a rectangular region
+- ink: a path
+- find result: search-result rectangles
+- current selection: an independent selection color
 
-ページ座標を表示座標へ毎回変換するので、ズーム、回転、見開き、再描画後も注釈位置が維持される。
+Page coordinates are converted to display coordinates on every render, so
+annotation positions survive zooming, rotation, spread mode, and rerendering.
 
-## 8. 注釈状態と保存
+## 8. Annotation State and Persistence
 
-主な実装:
+Primary implementation locations:
 
 - `reader/src/common/annotation-manager.js`
 - `reader/src/common/reader.js`
 
-`AnnotationManager` が注釈の唯一の正本である。
+`AnnotationManager` is the sole canonical source of annotation state.
 
 - add / update / delete
-- 色変更
-- highlight と underline の相互変換
-- sortIndex 順の整列
+- color changes
+- conversion between highlight and underline
+- ordering by `sortIndex`
 - undo / redo
-- client から来た `setAnnotations` / `unsetAnnotations`
-- 1 秒 debounce、最大 10 秒で host callback へ保存
+- client-originated `setAnnotations` / `unsetAnnotations`
+- saving through host callbacks after a one-second debounce, with a ten-second
+  maximum delay
 
-削除では、まずメモリ上の注釈を null change として適用して即時再描画し、その後 host の delete callback を呼ぶ。
+For deletion, it first applies the annotation as a null change in memory and
+rerenders immediately, then calls the host's delete callback.
 
-Rill では Reader と React の両方を正本にすると削除や色変更が片側だけ残る。Rill の adapter でコマンドを一方向に流し、Reader の callback から返った確定状態を Rill store と JSON / Markdown へ反映する必要がある。
+If both Reader and React are canonical in Rill, deletions or color changes can
+remain on only one side. Commands must flow in one direction through Rill's
+adapter, and the confirmed state returned through Reader callbacks must be
+projected into the Rill store and JSON / Markdown.
 
-## 9. PDF 内検索
+## 9. In-PDF Search
 
-主な実装:
+Primary implementation location:
 
 - `reader/src/pdf/pdf-find-controller.js`
 
-各ページの `StructuredChar.u` を連結し、検索用に Unicode 正規化する。同時に検索文字位置から元の文字オフセットへ戻す mapping を作る。
+The `StructuredChar.u` values for each page are concatenated and Unicode-
+normalized for searching. A mapping is built at the same time so that positions
+in the search string can be converted back into original character offsets.
 
-検索一致は文字オフセットから `getRangeRects()` で PDF 矩形へ戻される。したがって検索結果の表示と本文選択が同じ座標系になる。
+Matches are converted from character offsets into PDF rectangles by
+`getRangeRects()`. Search-result rendering and body-text selection therefore use
+the same coordinate system.
 
-対応要素:
+Supported behavior includes:
 
-- 大文字小文字
-- 単語単位
-- 全件ハイライト
-- 前後移動
-- CJK の文字種
-- ダイアクリティカルマークと NFKC 系正規化
+- case sensitivity
+- whole-word matching
+- highlighting all matches
+- next / previous navigation
+- CJK character classes
+- diacritical marks and NFKC-related normalization
 
-## 10. 目次、ページ番号、リンク
+## 10. Outline, Page Numbers, and Links
 
-### 目次
+### Outline
 
-まず PDF 内蔵 outline を読む。無い場合は、本文の主要フォントと異なる見出し候補、サイズ、連番、出現範囲を用いて最大 100 ページから outline を推定する。
+The embedded PDF outline is read first. If none exists, an outline is inferred
+from up to 100 pages using heading candidates, differences from the dominant
+body font, size, numbering, and the range over which candidates occur.
 
-### ページラベル
+### Page Labels
 
-PDF metadata の page labels を優先し、必要に応じて前後ページの同じ位置に並ぶアラビア数字またはローマ数字の連続列から印刷ページ番号を推定する。
+Page labels in PDF metadata take precedence. When necessary, printed page
+numbers are inferred from sequences of Arabic or Roman numerals aligned at the
+same location across neighboring pages.
 
-### リンクと引用
+### Links and Citations
 
-通常リンクに加え、本文中引用と参考文献候補を processed overlay として抽出する。Rill の初期段階では通常リンクだけを採用し、引用リンク解析は独立した後続機能にできる。
+In addition to regular links, in-text citations and bibliography candidates are
+extracted as processed overlays. An initial Rill implementation can adopt only
+regular links and leave citation-link analysis as an independent later feature.
 
-## 11. サムネイルと見開き
+## 11. Thumbnails and Spread Mode
 
-サムネイルは専用の一列 queue で必要ページだけを遅延描画する。HiDPI で二倍程度に描いて段階的に縮小し、ぼやけを抑える。既に表示済みのサムネイルだけを注釈変更時に再描画する。
+Thumbnails are rendered lazily for only the required pages through a dedicated
+single-lane queue. They are rendered at approximately double resolution for
+HiDPI and progressively downscaled to reduce blur. Annotation changes rerender
+only thumbnails for pages that have already been displayed.
 
-見開きとスクロールモードは PDF.js event bus の `switchspreadmode` / `switchscrollmode` を利用する。Rill UI はこの公開 adapter だけを呼べばよい。
+Spread and scroll modes use the PDF.js event bus events `switchspreadmode` and
+`switchscrollmode`. The Rill UI only needs to call this public adapter.
 
-## 12. 自動スクロール
+## 12. Automatic Scrolling
 
-選択中にポインタが viewer の端 25 px を越えると、距離に比例して最大 500 px/s で requestAnimationFrame スクロールする。選択状態は文字オフセットとして保持されるため、スクロールしても消えない。
+When the pointer moves more than 25 pixels beyond a viewer edge during
+selection, requestAnimationFrame scrolling begins at a distance-proportional
+speed of up to 500 pixels per second. Because selection state is retained as
+character offsets, it does not disappear while scrolling.
 
-## 13. Rill に採用する境界
+## 13. Boundary Adopted by Rill
 
-当面は、Zotero Reader / PDF.js fork を AGPL エンジンとして隔離し、Rill UI とは型付き adapter で接続するのが最も安全である。
+For the immediate term, the safest architecture is to isolate Zotero Reader and
+the PDF.js fork as an AGPL-covered engine and connect them to the Rill UI through
+a typed adapter.
 
 ```ts
 interface RillPdfEngine {
@@ -337,9 +420,10 @@ interface RillPdfEngine {
 }
 ```
 
-React から `_primaryView` や `_render()` のような private API を直接触らない。adapter 内部だけが upstream API 差分を吸収する。
+React must not call private APIs such as `_primaryView` or `_render()` directly.
+Only the adapter should absorb differences in upstream APIs.
 
-## 14. Rill 側の推奨モジュール
+## 14. Recommended Rill Modules
 
 ```text
 reader-engine/
@@ -365,40 +449,53 @@ reader-storage/
   obsidian-merge.ts
 ```
 
-## 15. 追加する Rill reading-order 層
+## 15. Additional Rill Reading-Order Layer
 
-元 PDF の文字順が壊れている文書を改善するため、Zotero の構造化文字の後段に任意の補助層を置く。
+To improve documents whose source PDF text order is broken, an optional helper
+layer can run after Zotero's structured-character processing.
 
-1. 行矩形を生成する。
-2. 横方向の空白帯から列を推定する。
-3. 全幅見出し、本文列、脚注、キャプションを block に分類する。
-4. block 間に「次に読む」有向辺を作る。
-5. PDF content stream 順と幾何順の差が小さい場合は元順を優先する。
-6. 信頼度が低い場合は並べ替えず、ユーザーが範囲を修正できるようにする。
+1. Generate line rectangles.
+2. Infer columns from horizontal bands of whitespace.
+3. Classify full-width headings, body columns, footnotes, and captions as
+   blocks.
+4. Build directed "read next" edges between blocks.
+5. Prefer the PDF content-stream order when its difference from geometric order
+   is small.
+6. Do not reorder low-confidence results; allow the user to correct the range.
 
-この層は Zotero の挙動を壊さないよう feature flag で導入する。
+This layer should be introduced behind a feature flag so that it does not
+degrade Zotero-derived behavior.
 
-## 16. ライセンス境界
+## 16. License Boundary
 
-Zotero Reader は GNU AGPLv3、Zotero の PDF.js fork には Mozilla / Apache 系を含む複数の第三者ライセンスがある。
+Zotero Reader is licensed under the GNU AGPLv3. Zotero's PDF.js fork includes
+components covered by multiple third-party licenses, including Mozilla and
+Apache licenses.
 
-Rill PDF Viewer Lab で実コードを組み込んで配布する場合は、少なくとも次を守る。
+Distributing a Rill PDF Viewer Lab build that incorporates this code requires,
+at minimum, the following:
 
-- 対応するソースを利用者へ提供する
-- AGPLv3 の COPYING と著作権表示を同梱する
-- 第三者 NOTICE / LICENSE を維持する
-- 改変箇所を明示する
-- Zotero の名称、ロゴ、画面を Rill のブランドとして使わない
-- 配布 DMG と対応する commit / tag を紐付ける
+- provide recipients with the corresponding source
+- bundle the AGPLv3 `COPYING` file and copyright notices
+- preserve third-party `NOTICE` and `LICENSE` files
+- identify modifications
+- do not present Zotero's name, logo, or interface as Rill branding
+- associate each distributed DMG with its corresponding commit or tag
 
-無料配布か有料配布かは、AGPL の遵守要否を変えない。寄付を受け取ること自体は問題にならないが、配布物の自由を制限しない。
+Whether distribution is free or paid does not change the obligation to comply
+with the AGPL. Accepting donations is not itself a problem, provided the freedom
+of the distributed software is not restricted.
 
-## 17. 現在の Reader Lab で分かった統合上の問題
+## 17. Integration Problems Identified in the Reader Lab
 
-- Rill React state と Reader AnnotationManager の二重管理がある。
-- 削除時に private API を複数回呼んでおり、中央 overlay と右メモの状態が一時的にずれる。
-- Rill toolbar から一部機能が Reader private view へ直接到達している。
-- upstream の selection popup を CSS で隠す・並べ替える方式は壊れやすい。
-- `nextPageRects` は二ページまでなので、三ページ以上の連続注釈方針を Rill 側で定義する必要がある。
+- Rill React state and Reader AnnotationManager both act as canonical state.
+- Deletion calls several private APIs, temporarily desynchronizing the central
+  overlay and right-hand notes.
+- Some Rill toolbar actions reach directly into Reader's private view.
+- Hiding or rearranging the upstream selection popup with CSS is fragile.
+- `nextPageRects` supports only two pages, so Rill must define a policy for
+  continuous annotations spanning three or more pages.
 
-解決方針は、Reader を headless に近い engine として扱い、選択確定・注釈追加・注釈変更・注釈削除を `ReaderEvent` として Rill へ一本化することである。
+The resolution is to treat Reader as an almost-headless engine and unify
+selection finalization, annotation creation, annotation changes, and annotation
+deletion as `ReaderEvent` messages delivered to Rill.

@@ -41,6 +41,8 @@ pub fn run() {
             library::open_rill_trash_folder,
             library::list_collections,
             library::create_collection,
+            library::rename_collection,
+            library::move_collection,
             library::delete_collection,
             library::move_paper_to_collection,
             library::export_library,

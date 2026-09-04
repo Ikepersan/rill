@@ -14,18 +14,22 @@ permissions:
 jobs:
   verify:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.13.0
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+          targets: aarch64-apple-darwin
 
       - name: Install dependencies
         run: npm ci
@@ -33,17 +37,32 @@ jobs:
       - name: Desktop contract tests
         run: npm run test:desktop
 
+      - name: Web prototype smoke tests
+        run: npm run test:web
+
       - name: Desktop frontend build
         run: npm run desktop:frontend:build
 
       - name: Lint
         run: npm run lint -- --quiet
 
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
+      - name: Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings
+
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Apple Silicon app bundle
+        run: npm exec tauri build -- --ci --bundles app --target aarch64-apple-darwin
 
       - name: Verify release metadata and bundled reader provenance
         run: node --test tests/macos-menu-contract.test.mjs tests/rill-reader-contract.test.mjs

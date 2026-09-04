@@ -1,4 +1,4 @@
-import type { PdfAnnotation } from "../PdfReader";
+import type { PdfAnnotation } from "./types";
 
 export type ReadingOrderResult = {
   annotation: PdfAnnotation;

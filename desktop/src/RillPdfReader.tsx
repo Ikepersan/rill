@@ -1,19 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { Paper } from "./App";
-import type { AnnotationColor, AnnotationKind, PdfAnnotation } from "./PdfReader";
 import { AnnotationRepository, type RepositoryState } from "./reader-engine/AnnotationRepository";
 import { IframeRillPdfEngine } from "./reader-engine/IframeRillPdfEngine";
-import type { ReaderEvent, SearchState } from "./reader-engine/types";
-import { nextPendingSelection } from "./reader-engine/selectionLifecycle";
+import type { AnnotationColor, AnnotationKind, PdfAnnotation, ReaderEvent, SearchState } from "./reader-engine/types";
+import { copyPlainText } from "./reader-engine/copyText";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
 type PageBox = { x0: number; y0: number; x1: number; y1: number };
 type OutlineItem = { title: string; dest: unknown; items?: OutlineItem[] };
 type PendingSelection = { annotation: PdfAnnotation; anchor: { x: number; y: number } };
+
+const MAX_READER_PAGES = 2_000;
+const MAX_CAPTURE_PIXELS = 16_000_000;
+const MAX_CAPTURE_DIMENSION = 8_192;
 
 const annotationColors: Array<{ color: AnnotationColor; label: string }> = [
   { color: "yellow", label: "黄" },
@@ -45,9 +48,26 @@ function PdfThumbnail({ document, page, active, onClick }: {
   active: boolean;
   onClick: () => void;
 }) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [visible, setVisible] = useState(page <= 3);
+
   useEffect(() => {
+    const button = buttonRef.current;
+    if (!button || visible || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      setVisible(true);
+      observer.disconnect();
+    }, { rootMargin: "320px 0px" });
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
+    let renderTask: ReturnType<Awaited<ReturnType<PDFDocumentProxy["getPage"]>>["render"]> | null = null;
     void document.getPage(page).then((pdfPage) => {
       if (cancelled || !canvasRef.current) return;
       const viewport = pdfPage.getViewport({ scale: 0.22 });
@@ -56,14 +76,18 @@ function PdfThumbnail({ document, page, active, onClick }: {
       if (!context) return;
       canvas.width = viewport.width;
       canvas.height = viewport.height;
-      void pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
+      renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
+      void renderTask.promise.catch(() => undefined);
     });
-    return () => { cancelled = true; };
-  }, [document, page]);
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+    };
+  }, [document, page, visible]);
   return (
-    <button type="button" className={active ? "pdf-thumbnail active" : "pdf-thumbnail"} onClick={onClick}>
-      <canvas ref={canvasRef} />
-      <span>{page}</span>
+    <button ref={buttonRef} type="button" className={active ? "pdf-thumbnail active" : "pdf-thumbnail"} onClick={onClick}>
+      <span className="pdf-thumbnail-preview"><canvas ref={canvasRef} /></span>
+      <span className="pdf-thumbnail-number">{page}</span>
     </button>
   );
 }
@@ -72,12 +96,30 @@ async function captureAreaImage(document: PDFDocumentProxy, annotation: PdfAnnot
   const rect = annotation.rects[0];
   if (!rect) return undefined;
   const page = await document.getPage(rect.page ?? annotation.page);
-  const viewport = page.getViewport({ scale: 2 });
+  const naturalViewport = page.getViewport({ scale: 1 });
+  if (
+    !Number.isFinite(naturalViewport.width)
+    || !Number.isFinite(naturalViewport.height)
+    || naturalViewport.width <= 0
+    || naturalViewport.height <= 0
+  ) return undefined;
+  const pixelScale = Math.sqrt(MAX_CAPTURE_PIXELS / Math.max(1, naturalViewport.width * naturalViewport.height));
+  const dimensionScale = MAX_CAPTURE_DIMENSION / Math.max(1, naturalViewport.width, naturalViewport.height);
+  const scale = Math.min(2, pixelScale, dimensionScale);
+  if (!Number.isFinite(scale) || scale <= 0) return undefined;
+  const viewport = page.getViewport({ scale });
+  const sourceWidth = Math.max(1, Math.floor(viewport.width));
+  const sourceHeight = Math.max(1, Math.floor(viewport.height));
+  if (
+    sourceWidth > MAX_CAPTURE_DIMENSION
+    || sourceHeight > MAX_CAPTURE_DIMENSION
+    || sourceWidth * sourceHeight > MAX_CAPTURE_PIXELS
+  ) return undefined;
   const source = window.document.createElement("canvas");
   const sourceContext = source.getContext("2d");
   if (!sourceContext) return undefined;
-  source.width = Math.ceil(viewport.width);
-  source.height = Math.ceil(viewport.height);
+  source.width = sourceWidth;
+  source.height = sourceHeight;
   await page.render({ canvas: source, canvasContext: sourceContext, viewport }).promise;
   const crop = window.document.createElement("canvas");
   crop.width = Math.max(1, Math.round(source.width * rect.width));
@@ -111,9 +153,13 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
   const repositoryRef = useRef<AnnotationRepository | null>(null);
   const pdfDocumentRef = useRef<PDFDocumentProxy | null>(null);
   const paperRef = useRef(paper);
+  const onCloseRef = useRef(onClose);
   const onToastRef = useRef(onToast);
+  const onRegisterFlushRef = useRef(onRegisterFlush);
+  const closeInFlightRef = useRef(false);
   const pendingDismissTimerRef = useRef(0);
   const menuPointerDownAtRef = useRef(0);
+  const pendingRef = useRef<PendingSelection | null>(null);
   const [iframeReady, setIframeReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -143,16 +189,64 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
         ? "入力中…"
         : "保存済み・Markdown同期済み";
 
+  function updatePendingSelection(next: PendingSelection | null) {
+    pendingRef.current = next;
+    setPending(next);
+  }
+
   useEffect(() => {
     paperRef.current = paper;
   }, [paper]);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     onToastRef.current = onToast;
   }, [onToast]);
 
   useEffect(() => {
+    onRegisterFlushRef.current = onRegisterFlush;
+  }, [onRegisterFlush]);
+
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
+
+  const closeReader = useCallback(async () => {
+    if (closeInFlightRef.current) return;
+    closeInFlightRef.current = true;
+    window.clearTimeout(pendingDismissTimerRef.current);
+    try {
+      await repositoryRef.current?.flush();
+      onCloseRef.current();
+    } catch (closeError) {
+      closeInFlightRef.current = false;
+      onToastRef.current(`注釈の保存が完了していないため、Libraryに戻れませんでした: ${String(closeError)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleCopyRequest = (event: Event) => {
+      if (!pendingRef.current) return;
+      event.preventDefault();
+      void copyPendingSelection();
+    };
+    window.addEventListener("rill://copy-request", handleCopyRequest);
+    return () => window.removeEventListener("rill://copy-request", handleCopyRequest);
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditing = target instanceof HTMLElement
+        && (target.isContentEditable || target.matches("input, textarea, select"));
+      if (!isEditing && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c" && pendingRef.current) {
+        event.preventDefault();
+        void copyPendingSelection();
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
         event.preventDefault();
         window.document.getElementById("pdf-search")?.focus();
@@ -161,19 +255,20 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
       if (pending) {
         event.preventDefault();
         window.clearTimeout(pendingDismissTimerRef.current);
-        setPending(null);
+        updatePendingSelection(null);
         engineRef.current?.clearSelection();
       } else if (areaMode) {
         event.preventDefault();
         setAreaMode(false);
         engineRef.current?.setTool("pointer");
       } else {
-        onClose();
+        event.preventDefault();
+        void closeReader();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [areaMode, onClose, pending]);
+  }, [areaMode, closeReader, pending]);
 
   useEffect(() => {
     if (!pending) return;
@@ -181,7 +276,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
       const target = event.target;
       if (target instanceof Element && target.closest(".selection-menu")) return;
       window.clearTimeout(pendingDismissTimerRef.current);
-      setPending((current) => nextPendingSelection(current, { type: "cancel" }));
+      updatePendingSelection(null);
       engineRef.current?.clearSelection();
     };
     window.document.addEventListener("pointerdown", dismissOutsideMenu, true);
@@ -200,17 +295,16 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
       if (event.type === "selection-finalized") {
         window.clearTimeout(pendingDismissTimerRef.current);
         setPendingKind("highlight");
-        setPending((current) => nextPendingSelection(current, { type: "finalized", value: { annotation: event.annotation, anchor: event.anchor } }));
+        updatePendingSelection({ annotation: event.annotation, anchor: event.anchor });
       } else if (event.type === "selection-cleared") {
-        setPending((current) => nextPendingSelection(current, { type: "native-cleared" }));
         window.clearTimeout(pendingDismissTimerRef.current);
         if (window.performance.now() - menuPointerDownAtRef.current < 500) return;
         pendingDismissTimerRef.current = window.setTimeout(() => {
-          setPending((current) => nextPendingSelection(current, { type: "cancel" }));
+          updatePendingSelection(null);
         }, 350);
       } else if (event.type === "backdrop-tapped") {
         window.clearTimeout(pendingDismissTimerRef.current);
-        setPending((current) => nextPendingSelection(current, { type: "cancel" }));
+        updatePendingSelection(null);
         engineRef.current?.clearSelection();
       } else if (event.type === "annotation-draft") {
         const document = pdfDocumentRef.current;
@@ -231,8 +325,20 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
         setPageNumber(event.pageIndex + 1);
       } else if (event.type === "search-changed") {
         setSearchState(event.state ?? { total: 0, index: -1, snippets: [] });
+      } else if (event.type === "shortcut") {
+        if (event.command === "copy-selection") void copyPendingSelection();
+        else window.document.getElementById("pdf-search")?.focus();
       } else if (event.type === "link-opened" && event.url) {
-        window.open(event.url, "_blank");
+        try {
+          const target = new URL(event.url);
+          if (!["http:", "https:", "mailto:"].includes(target.protocol)) {
+            onToastRef.current("安全のため、この種類のリンクは開けません");
+            return;
+          }
+          window.open(target.href, "_blank", "noopener,noreferrer");
+        } catch {
+          onToastRef.current("PDF内のリンクを確認できませんでした");
+        }
       }
     };
 
@@ -246,9 +352,17 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
         ]);
         if (disposed) return;
         const sourceBytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw as unknown as ArrayLike<number>);
-        loadingTask = getDocument({ data: sourceBytes.slice() });
+        const engineBuffer = sourceBytes.slice().buffer as ArrayBuffer;
+        loadingTask = getDocument({
+          data: sourceBytes,
+          enableScripting: false,
+          isEvalSupported: false,
+        });
         const document = await loadingTask.promise;
         if (disposed) return;
+        if (document.numPages > MAX_READER_PAGES) {
+          throw new Error(`このPDFは${document.numPages}ページあります。Rillで開ける上限は${MAX_READER_PAGES}ページです。`);
+        }
         pdfDocumentRef.current = document;
         setPdfDocument(document);
         setPageCount(document.numPages);
@@ -266,7 +380,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
           (message) => onToastRef.current(message),
         );
         repositoryRef.current = repository;
-        onRegisterFlush?.(() => repository.flush());
+        onRegisterFlushRef.current?.(() => repository.flush());
         unsubscribeRepository = repository.subscribe((state) => {
           setRepositoryState(state);
           engineRef.current?.setAnnotations(state.annotations, state.revision);
@@ -277,8 +391,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
         const engine = new IframeRillPdfEngine(iframeRef.current, boxes);
         engineRef.current = engine;
         unsubscribeEngine = engine.subscribe((event) => { void handleEngineEvent(event); });
-        const buffer = sourceBytes.buffer.slice(sourceBytes.byteOffset, sourceBytes.byteOffset + sourceBytes.byteLength) as ArrayBuffer;
-        await engine.open(buffer, repository.snapshot);
+        await engine.open(engineBuffer, repository.snapshot);
         if (!disposed) setLoading(false);
       } catch (loadError) {
         if (!disposed) {
@@ -297,8 +410,8 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
       engineRef.current?.destroy();
       engineRef.current = null;
       const repository = repositoryRef.current;
-      if (repository) void repository.flush();
-      onRegisterFlush?.(null);
+      const finalFlush = repository?.flush() ?? Promise.resolve();
+      onRegisterFlushRef.current?.(() => finalFlush);
       repositoryRef.current = null;
       pdfDocumentRef.current = null;
       void loadingTask?.destroy();
@@ -309,10 +422,29 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
     if (!pending) return;
     const annotation = { ...pending.annotation, kind: pendingKind, color };
     window.clearTimeout(pendingDismissTimerRef.current);
-    setPending((current) => nextPendingSelection(current, { type: "cancel" }));
+    updatePendingSelection(null);
     engineRef.current?.clearSelection();
     setActiveAnnotationId(annotation.id);
     repositoryRef.current?.update((current) => [...current, annotation], { message: `${kindLabels[pendingKind]}をメモへ追加しました` });
+  }
+
+  async function copyPendingSelection() {
+    const selection = pendingRef.current;
+    if (!selection) return;
+    let copied = false;
+    try {
+      copied = await copyPlainText(selection.annotation.text);
+    } catch {
+      copied = false;
+    }
+    if (!copied) {
+      onToastRef.current("選択した文章をコピーできませんでした");
+      return;
+    }
+    window.clearTimeout(pendingDismissTimerRef.current);
+    updatePendingSelection(null);
+    engineRef.current?.clearSelection();
+    onToastRef.current("選択した文章をコピーしました");
   }
 
   function updateAnnotation(id: string, patch: Partial<PdfAnnotation>, persist = false) {
@@ -355,7 +487,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
   function toggleCapture() {
     const next = !areaMode;
     setAreaMode(next);
-    setPending(null);
+    updatePendingSelection(null);
     engineRef.current?.clearSelection();
     engineRef.current?.setTool(next ? "area-capture" : "pointer");
     if (next) onToast("PDF上をドラッグして、撮影する範囲を囲んでください");
@@ -364,7 +496,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
   return (
     <section className="reader-view rill-engine-reader">
       <header className="reader-toolbar">
-        <button type="button" className="reader-back" onClick={onClose} title="Libraryへ戻る（Esc）"><span>←</span><strong>Back</strong><small>Library</small></button>
+        <button type="button" className="reader-back" onClick={() => { void closeReader(); }} title="Libraryへ戻る（Esc）"><span>←</span><strong>Back</strong><small>Library</small></button>
         <div className="reader-title"><strong>{paper.title}</strong><small>{paper.authors[0] ?? "著者未登録"} · {paper.year ?? "年不明"}</small></div>
         <label className="reader-search">
           <span>⌕</span>
@@ -413,8 +545,12 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
         </aside>
       </div>
       {pending && (
-        <div className="selection-menu expanded" role="dialog" aria-label="選択した文章に注釈を追加" onPointerDown={() => { menuPointerDownAtRef.current = window.performance.now(); window.clearTimeout(pendingDismissTimerRef.current); }} style={{ left: Math.max(8, Math.min(pending.anchor.x - 145, window.innerWidth - 310)), top: Math.max(76, Math.min(pending.anchor.y + 10, window.innerHeight - 112)) }}>
-          <div className="annotation-kind-options">{(["highlight", "underline", "strikeout"] as const).map((kind) => <button key={kind} type="button" className={pendingKind === kind ? "active" : ""} onClick={() => setPendingKind(kind)}>{kindLabels[kind]}</button>)}</div>
+        <div className="selection-menu expanded" role="dialog" aria-label="選択した文章の操作" onPointerDown={() => { menuPointerDownAtRef.current = window.performance.now(); window.clearTimeout(pendingDismissTimerRef.current); }} style={{ left: Math.max(8, Math.min(pending.anchor.x - 145, window.innerWidth - 310)), top: Math.max(76, Math.min(pending.anchor.y + 10, window.innerHeight - 112)) }}>
+          <div className="annotation-kind-options">
+            <button type="button" className="copy-selection" title="選択した文章をコピー" onClick={() => void copyPendingSelection()}><span>⧉</span>コピー</button>
+            <i aria-hidden="true" />
+            {(["highlight", "underline", "strikeout"] as const).map((kind) => <button key={kind} type="button" className={pendingKind === kind ? "active" : ""} onClick={() => setPendingKind(kind)}>{kindLabels[kind]}</button>)}
+          </div>
           <div className="annotation-color-options">{annotationColors.map(({ color, label }) => <button key={color} type="button" className={color} title={`${label}で追加`} onClick={() => addTextAnnotation(color)}><span /></button>)}</div>
         </div>
       )}

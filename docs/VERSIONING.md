@@ -1,11 +1,11 @@
 # Rill versioning
 
-Rill's current public release is version `1.0.0`. It is the first signed and
-notarized public distribution.
+Rill's current public release is version `1.0.0`. Version `1.0.3` is the next
+maintenance release candidate.
 
 Published versions follow semantic versioning:
 
-- patch (`1.0.1`): compatible fixes and small refinements after 1.0
+- patch (`1.0.3`): compatible fixes and small refinements after 1.0
 - minor (`1.1.0`): compatible features
 - major (`2.0.0`): changes that require a migration or materially alter the library format
 

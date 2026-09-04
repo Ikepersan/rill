@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "rill"
-version = "1.0.0"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",

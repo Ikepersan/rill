@@ -1,37 +1,46 @@
-# Rill PDF Reader 統合計画
+# Rill PDF Reader Integration Plan
 
-> **Rill 0.8.0 の実装について** これは開発時の計画記録である。Rill
-> 0.8.0 は、Zotero Reader の表示UIを使用せず、AGPLv3に基づいてその一部を
-> 改変したPDF文字選択エンジンを同梱する。画面、Reading Notes、注釈管理、
-> Markdown保存はRill側の実装である。
+> **About the Rill 0.8.0 implementation:** This document is a historical
+> development plan. Rill 0.8.0 bundles a modified PDF text-selection engine
+> derived in part from Zotero Reader and distributed under the GNU AGPLv3. It
+> does not use Zotero Reader's presentation UI. The application shell, Reading
+> Notes, annotation management, and Markdown persistence are implemented by
+> Rill.
 
-## 完成条件
+## Completion Criteria
 
-Rill の見た目とワークフローを保ったまま、次を満たす。
+The following requirements must be met without changing Rill's appearance or
+workflow:
 
-- 二段組みの左段下部から右段上部へ自然に選択できる
-- 右段上部から左段下部への逆方向選択も同じ文章になる
-- スクロール、ズーム、見開き切替で選択が消えない
-- 選択表示と Reading Notes の引用文が一致する
-- 削除、色変更、下線変換が中央表示と右メモへ同時に反映される
-- PDF 内検索、目次、サムネイル、見開き表示が Rill UI から操作できる
-- 注釈はローカル JSON と Markdown へ原子的に保存される
-- Obsidian の変更と安全に三方向マージできる
+- text can be selected naturally from the bottom of the left column to the top
+  of the right column in a two-column document
+- reverse selection from the top of the right column to the bottom of the left
+  column produces the same text
+- selection remains active across scrolling, zooming, and spread-mode changes
+- the visible selection and quoted text in Reading Notes match
+- deletion, color changes, and conversion to underline update the central view
+  and right-hand notes at the same time
+- in-PDF search, outline, thumbnails, and spread mode can be controlled from the
+  Rill UI
+- annotations are saved atomically to local JSON and Markdown
+- Obsidian changes can be merged safely with a three-way merge
 
-## フェーズ 0: 解析基準を固定
+## Phase 0: Pin the Analysis Baseline
 
-- upstream commit を固定する
-- Reader Lab の DMG、ソース commit、第三者ライセンスを対応付ける
-- 病的 PDF を含む非公開ローカル fixture 一覧を作る
-- テスト用 PDF や論文本文を GitHub へコミットしない
+- pin the upstream commits
+- associate the Reader Lab DMG, source commit, and third-party licenses
+- prepare a list of private local fixtures, including pathological PDFs
+- do not commit test PDFs or article text to GitHub
 
-完了判定: 同じソースから同じ lab app を再生成できる。
+Completion gate: the same lab application can be reproduced from the same
+source.
 
-## フェーズ 1: エンジン adapter
+## Phase 1: Engine Adapter
 
-`RillPdfReader.tsx` は upstream private API へ直接アクセスせず、`RillPdfEngine` adapter だけを利用する。
+`RillPdfReader.tsx` must use only the `RillPdfEngine` adapter and must not access
+private upstream APIs directly.
 
-対象コマンド:
+Supported commands:
 
 - open / close
 - page navigation
@@ -44,13 +53,15 @@ Rill の見た目とワークフローを保ったまま、次を満たす。
 - selection finalized
 - document stats
 
-イベントには必ず単調増加する revision を付ける。古い非同期 save callback が新しい UI state を上書きしないようにする。
+Every event must include a monotonically increasing revision. An older
+asynchronous save callback must never overwrite newer UI state.
 
-完了判定: React component に `_primaryView`、`_render`、Reader 内部 state 名が出現しない。
+Completion gate: the React component contains no `_primaryView`, `_render`, or
+Reader-internal state names.
 
-## フェーズ 2: 単一の注釈ストア
+## Phase 2: One Canonical Annotation Store
 
-Rill 側に `AnnotationRepository` を設ける。
+Create an `AnnotationRepository` on the Rill side.
 
 ```text
 User action
@@ -62,172 +73,195 @@ User action
   -> Markdown projection
 ```
 
-注釈削除では、次を一つの transaction とする。
+An annotation deletion must perform the following as one transaction:
 
-1. engine から overlay を除外
-2. selected annotation を解除
-3. Rill store から除外
-4. 右メモを更新
-5. JSON を一時ファイル経由で rename
-6. Markdown の Highlights section を更新
+1. remove the overlay from the engine
+2. clear the selected annotation
+3. remove it from the Rill store
+4. update the right-hand notes
+5. rename the JSON file into place through a temporary file
+6. update the Highlights section in Markdown
 
-保存失敗時は UI に失敗を示し、メモリ上の revision とディスク revision を区別する。
+If saving fails, display the failure in the UI and distinguish the in-memory
+revision from the on-disk revision.
 
-完了判定: 削除後、中央 overlay、右メモ、再起動後の三者が一致する。
+Completion gate: after deletion, the central overlay, right-hand notes, and
+post-restart state all agree.
 
-## フェーズ 3: Rill 固有の選択 UI
+## Phase 3: Rill-Specific Selection UI
 
-upstream selection popup を表示せず、選択確定 event を受けて Rill の popup を描く。
+Do not display the upstream selection popup. Receive the finalized-selection
+event and render Rill's popup with the following actions:
 
-- ハイライト
-- 下線
-- 取り消し線
-- 色
-- メモに追加
-- コピー
+- highlight
+- underline
+- strikeout
+- color
+- add to notes
+- copy
 
-取り消し線は Reader の基礎 annotation model を拡張するか、Rill adapter 上の独自 type として保持する。upstream type へ無理に偽装しない。
+Strikeout should either extend Reader's base annotation model or remain a
+Rill-specific type in the adapter. It must not be forced into an unrelated
+upstream type.
 
-完了判定: Zotero 固有のラベル、アイコン、レイアウトが画面に出ず、Rill の操作感だけになる。
+Completion gate: no Zotero-specific labels, icons, or layouts appear on screen;
+only Rill's interaction design remains.
 
-## フェーズ 4: 読み順強化
+## Phase 4: Reading-Order Improvements
 
-まず Zotero の structured chars をそのまま基準にする。その上で feature flag `rillReadingOrderV2` を作る。
+Use Zotero's structured characters unchanged as the initial baseline. Then add
+a `rillReadingOrderV2` feature flag.
 
-### V2 パイプライン
+### V2 Pipeline
 
-1. StructuredChar から Line を作る
-2. 重複行、ヘッダー、フッター、ページ番号を除外
-3. 全幅領域と列領域を分離
-4. column gap をクラスタリング
-5. Line を TextBlock へ結合
-6. font / indent / spacing / punctuation から段落を推定
-7. block graph を topological sort
-8. 元ストリーム順との edit distance を測り、信頼度を付ける
+1. Build Lines from StructuredChar values.
+2. Remove duplicate lines, headers, footers, and page numbers.
+3. Separate full-width regions from column regions.
+4. Cluster column gaps.
+5. Combine Lines into TextBlocks.
+6. Infer paragraphs from font, indentation, spacing, and punctuation.
+7. Topologically sort the block graph.
+8. Measure edit distance from the original stream order and assign a confidence
+   score.
 
-低信頼度 PDF では自動並べ替えを使わず、元順を維持する。
+For low-confidence PDFs, retain the original order rather than applying
+automatic reordering.
 
-完了判定: fixture の二段組みで、表示範囲と引用テキストの順序が一致する。
+Completion gate: for two-column fixtures, the visible range and the order of
+quoted text agree.
 
-## フェーズ 5: 検索・目次・サムネイル
+## Phase 5: Search, Outline, and Thumbnails
 
-### 検索
+### Search
 
-- StructuredChar の文字列と offset mapping を利用
-- current / all match を Rill overlay へ描画
-- Enter / Shift+Enter と上下ボタンに対応
+- use the StructuredChar string and offset mapping
+- draw the current match and all matches in the Rill overlay
+- support Enter / Shift+Enter and the Up/Down buttons
 
-### 目次
+### Outline
 
-- native outline を優先
-- 無い場合の推定 outline は「自動生成」と表示
-- 推定結果をユーザーデータへ勝手に保存しない
+- prefer the native outline
+- label an inferred outline as "Automatically generated"
+- do not save inferred results into user data without permission
 
-### サムネイル
+### Thumbnails
 
-- 可視範囲を優先する一列 queue
-- HiDPI render -> 段階縮小
-- 注釈変更時は描画済みページだけ invalidate
+- use a single-lane queue that prioritizes the visible range
+- render for HiDPI, then downscale progressively
+- when annotations change, invalidate only pages that have already been
+  rendered
 
-完了判定: 100 ページ以上の PDF でも最初の表示を妨げず、スクロールに応じて遅延描画される。
+Completion gate: a PDF of 100 or more pages does not delay the initial view, and
+thumbnails render lazily as the user scrolls.
 
-## フェーズ 6: 注釈拡張
+## Phase 6: Annotation Extensions
 
-- ハイライト
-- 下線
-- 取り消し線
-- 範囲画像
-- 付箋
-- 色の後変更
-- 範囲端の調整
+- highlight
+- underline
+- strikeout
+- area image
+- sticky note
+- post-creation color changes
+- range-end adjustment
 - undo / redo
 
-注釈座標は PDF coordinate で保存する。CSS pixel や現在の zoom を保存しない。
+Store annotation positions in PDF coordinates. Do not store CSS pixels or the
+current zoom level.
 
-範囲画像は画像データを Markdown へ base64 で埋めず、Rill library の attachment file として保存し相対リンクする。
+Do not embed area-image data in Markdown as base64. Save it as an attachment in
+the Rill library and use a relative link.
 
-完了判定: zoom 変更、回転、再起動後にも位置と画像が一致する。
+Completion gate: positions and images remain correct after zooming, rotation,
+and restart.
 
-## フェーズ 7: Markdown / Obsidian
+## Phase 7: Markdown / Obsidian
 
-注釈 JSON を正本、Markdown の Highlights section を投影とする。
+Treat annotation JSON as canonical and the Highlights section in Markdown as a
+projection.
 
-- Rill 管理 section に安定 ID を埋める
-- Rill base、disk current、Rill next の三方向マージ
-- ユーザーが section 外へ書いた文章を保持
-- 同じ注釈コメントが双方で変わったときだけ conflict UI を出す
-- atomic write と backup generation を使う
+- embed stable IDs in the Rill-managed section
+- perform a three-way merge of the Rill base, current disk state, and Rill next
+- preserve text written by the user outside the managed section
+- show conflict UI only when the same annotation comment changed on both sides
+- use atomic writes and backup generations
 
-完了判定: Obsidian と Rill で同じノートを交互に編集しても、ユーザー文章が失われない。
+Completion gate: user-authored text is not lost when the same note is edited
+alternately in Obsidian and Rill.
 
-## テストマトリクス
+## Test Matrix
 
-### 文字と段組み
+### Text and Column Layout
 
-- 一段組み
-- 二段組み 左下 -> 右上
-- 二段組み 右上 -> 左下
-- 三段組み
-- 全幅見出し + 二段本文
-- 本文途中の全幅図表
-- 脚注
-- ヘッダー / フッター / DOI / ページ番号
-- キャプションと本文が隣接
+- single column
+- two columns, bottom left -> top right
+- two columns, top right -> bottom left
+- three columns
+- full-width heading + two-column body
+- full-width figure or table inside body text
+- footnotes
+- header / footer / DOI / page number
+- caption adjacent to body text
 
-### 文字エンコーディング
+### Text Encoding
 
-- `fi` / `fl` 合字
+- `fi` / `fl` ligatures
 - combining marks
-- ハイフネーション
-- OCR の一行一段落
-- 透明文字の重複
+- hyphenation
+- OCR with one paragraph per line
+- duplicated transparent text
 - CJK
 - RTL
-- 縦書き
-- 90 / 180 / 270 度回転文字
+- vertical writing
+- text rotated 90 / 180 / 270 degrees
 - Type 3 font
 
-### 操作
+### Interaction
 
-- 正方向 / 逆方向ドラッグ
-- ダブルクリック単語選択
-- トリプルクリック行選択
-- Shift + click
-- Shift + arrow
-- 選択中の上下スクロール
-- ページをまたぐ選択
-- zoom 中の選択
-- 見開き中の選択
-- 選択直後の色変更
-- 注釈削除後の再起動
+- forward / reverse drag
+- double-click word selection
+- triple-click line selection
+- Shift + Click
+- Shift + Arrow
+- vertical scrolling while selecting
+- cross-page selection
+- selection while zoomed
+- selection in spread mode
+- color change immediately after selection
+- restart after deleting an annotation
 
-### 品質判定
+### Quality Criteria
 
-各 fixture で次を保存する。
+Store the following for every fixture:
 
 - expected text
 - expected ordered line IDs
 - expected page / rect count
 - expected excluded regions
-- forward / reverse の一致
+- agreement between forward / reverse selection
 
-画像 snapshot だけでなく、文字列と rect の構造 assertion を必須にする。
+Require structural assertions for text and rectangles, not only image
+snapshots.
 
-## 既知の制約
+## Known Limitations
 
-- PDF に正しい文字マッピングが無い場合、OCR なしでは復元できない。
-- 複雑な表は「読む順序」が一意ではない。
-- 数式、脚注、サイドバーは文書ごとの意味推定が必要になる。
-- 三ページ以上を一件の注釈として扱う形式は Rill 側で拡張が必要。
-- upstream 更新時には fork の `getPageData()` 契約を回帰テストする必要がある。
+- If a PDF lacks a correct character mapping, its text cannot be recovered
+  without OCR.
+- Complex tables do not have a single unambiguous reading order.
+- Mathematical notation, footnotes, and sidebars require document-specific
+  semantic inference.
+- Rill must extend its format to represent one annotation across three or more
+  pages.
+- Updates to upstream require regression testing of the fork's `getPageData()`
+  contract.
 
-## リリースゲート
+## Release Gate
 
-Reader Lab から main へ入れる条件は次の通り。
+The following conditions must be met before moving Reader Lab into main:
 
-1. Rill UI のまま動く。
-2. 代表 fixture の選択順テストがすべて通る。
-3. 削除と色変更の state divergence がない。
-4. JSON / Markdown の再起動 round trip が通る。
-5. AGPL / third-party notice と対応ソース URL が DMG から確認できる。
-6. upstream private API を UI component が直接呼ばない。
+1. It operates entirely within the Rill UI.
+2. All selection-order tests for representative fixtures pass.
+3. Deletion and color changes do not produce state divergence.
+4. JSON / Markdown restart round trips pass.
+5. The AGPL / third-party notices and corresponding source URL are accessible
+   from the DMG.
+6. UI components do not call private upstream APIs directly.
