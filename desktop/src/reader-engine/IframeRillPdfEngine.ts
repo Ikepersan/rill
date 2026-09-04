@@ -1,13 +1,20 @@
-import type { AnnotationColor, AnnotationKind, PdfAnnotation } from "../PdfReader";
 import type {
+  AnnotationColor,
+  AnnotationKind,
   AnnotationTarget,
   DocumentInfo,
   PageTarget,
+  PdfAnnotation,
   ReaderEvent,
   RillPdfEngine,
   SearchState,
 } from "./types";
 import { rillReadingOrderV2 } from "./rillReadingOrderV2";
+import {
+  sanitizePersistedAnnotationColor,
+  sanitizePersistedAnnotationGeometry,
+  sanitizePersistedAnnotationKind,
+} from "./sanitizeAnnotationGeometry";
 
 type PageBox = { x0: number; y0: number; x1: number; y1: number };
 type EngineRect = [number, number, number, number];
@@ -77,6 +84,26 @@ function toEngineRect(rect: PdfAnnotation["rects"][number], box: PageBox): Engin
   return [left, bottom, right, top];
 }
 
+function isUsablePageBox(box: PageBox | undefined): box is PageBox {
+  return !!box
+    && Number.isFinite(box.x0)
+    && Number.isFinite(box.y0)
+    && Number.isFinite(box.x1)
+    && Number.isFinite(box.y1)
+    && box.x1 > box.x0
+    && box.y1 > box.y0;
+}
+
+function isEngineAnnotation(annotation: EngineAnnotation | null): annotation is EngineAnnotation {
+  return annotation !== null;
+}
+
+function isEngineRect(rect: unknown): rect is EngineRect {
+  return Array.isArray(rect)
+    && rect.length === 4
+    && rect.every((value) => typeof value === "number" && Number.isFinite(value));
+}
+
 function fromEngineRect(rect: EngineRect, page: number, box: PageBox): PdfAnnotation["rects"][number] {
   const width = box.x1 - box.x0;
   const height = box.y1 - box.y0;
@@ -108,11 +135,13 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   async open(pdf: ArrayBuffer, annotations: PdfAnnotation[]): Promise<DocumentInfo> {
     const frameWindow = this.frame.contentWindow as EngineWindow | null;
     if (!frameWindow?.createRillPdfEngine) throw new Error("Rill PDF selection engineを読み込めませんでした");
-    const bytes = new frameWindow.Uint8Array(Array.from(new Uint8Array(pdf)));
+    // A number[] expands every PDF byte into a boxed JS number and can multiply
+    // memory use for large papers. Copy directly into the iframe's typed array.
+    const bytes = new frameWindow.Uint8Array(pdf);
     this.bridge = frameWindow.createRillPdfEngine({
       type: "pdf",
       data: { buf: bytes, url: new URL("/rill-pdf-engine/", window.location.href).toString() },
-      annotations: annotations.map((annotation) => this.toEngineAnnotation(annotation)).filter(Boolean),
+      annotations: annotations.map((annotation) => this.toEngineAnnotation(annotation)).filter(isEngineAnnotation),
       readOnly: false,
       authorName: "Rill",
       showAnnotations: true,
@@ -144,11 +173,12 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   setTool(tool: "pointer" | "area-capture") { this.bridge?.setTool(tool); }
 
   setAnnotations(snapshot: PdfAnnotation[], revision: number) {
-    this.bridge?.setAnnotations(snapshot.map((annotation) => this.toEngineAnnotation(annotation)).filter(Boolean), revision);
+    this.bridge?.setAnnotations(snapshot.map((annotation) => this.toEngineAnnotation(annotation)).filter(isEngineAnnotation), revision);
   }
 
   search(query: string) {
     return new Promise<SearchState>((resolve) => {
+      this.pendingSearch?.({ total: 0, index: -1, snippets: [] });
       this.pendingSearch = resolve;
       this.bridge?.search(query);
       if (!query) {
@@ -173,6 +203,7 @@ export class IframeRillPdfEngine implements RillPdfEngine {
     this.unsubscribeBridge = null;
     this.bridge?.destroy();
     this.bridge = null;
+    this.pendingSearch?.({ total: 0, index: -1, snippets: [] });
     this.pendingSearch = null;
     this.listeners.clear();
   }
@@ -236,32 +267,39 @@ export class IframeRillPdfEngine implements RillPdfEngine {
       this.emit({ type: "search-changed", state: result });
       return;
     }
+    if (event.type === "shortcut") {
+      const command = event.command;
+      if (command === "copy-selection" || command === "focus-search") {
+        this.emit({ type: "shortcut", command });
+      }
+      return;
+    }
     if (event.type === "link-opened") {
       this.emit({ type: "link-opened", url: String(event.url ?? "") });
     }
   }
 
-  private toEngineAnnotation(annotation: PdfAnnotation): EngineAnnotation {
-    const grouped = new Map<number, PdfAnnotation["rects"]>();
-    for (const rect of annotation.rects) {
-      const page = rect.page ?? annotation.page;
-      grouped.set(page, [...(grouped.get(page) ?? []), rect]);
-    }
-    const pages = [...grouped.keys()].sort((a, b) => a - b);
-    const page = pages[0] ?? annotation.page;
+  private toEngineAnnotation(annotation: PdfAnnotation): EngineAnnotation | null {
+    const geometry = sanitizePersistedAnnotationGeometry(annotation, this.boxes.length);
+    if (!geometry) return null;
+    const kind = sanitizePersistedAnnotationKind(annotation.kind);
+    const color = sanitizePersistedAnnotationColor(annotation.color);
+    const page = geometry.page;
     const box = this.boxes[page - 1];
+    if (!isUsablePageBox(box)) return null;
     const position: EngineAnnotation["position"] = {
       pageIndex: page - 1,
-      rects: (grouped.get(page) ?? []).map((rect) => toEngineRect(rect, box)),
+      rects: geometry.rects.map((rect) => toEngineRect(rect, box)),
     };
-    const nextPage = pages.find((value) => value === page + 1);
-    if (nextPage && this.boxes[nextPage - 1]) {
-      position.nextPageRects = (grouped.get(nextPage) ?? []).map((rect) => toEngineRect(rect, this.boxes[nextPage - 1]));
+    if (geometry.nextPageRects) {
+      const nextPageBox = this.boxes[page];
+      if (!isUsablePageBox(nextPageBox)) return null;
+      position.nextPageRects = geometry.nextPageRects.map((rect) => toEngineRect(rect, nextPageBox));
     }
     return {
       id: annotation.id,
-      type: annotation.kind === "area" ? "image" : annotation.kind,
-      color: colorToHex[annotation.color],
+      type: kind === "area" ? "image" : kind,
+      color: colorToHex[color],
       sortIndex: `${String(page - 1).padStart(5, "0")}|000000|00000`,
       pageLabel: String(page),
       position,
@@ -277,12 +315,24 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   }
 
   private fromEngineAnnotation(annotation: EngineAnnotation): PdfAnnotation | null {
-    const page = annotation.position?.pageIndex + 1;
+    if (!annotation?.position) return null;
+    const { position } = annotation;
+    if (typeof position.pageIndex !== "number" || !Number.isInteger(position.pageIndex)) return null;
+    const page = position.pageIndex + 1;
     const box = this.boxes[page - 1];
-    if (!page || !box || !annotation.position?.rects) return null;
-    const rects = annotation.position.rects.map((rect) => fromEngineRect(rect, page, box));
-    if (annotation.position.nextPageRects?.length && this.boxes[page]) {
-      rects.push(...annotation.position.nextPageRects.map((rect) => fromEngineRect(rect, page + 1, this.boxes[page])));
+    if (!isUsablePageBox(box) || !Array.isArray(position.rects)) return null;
+    if (!position.rects.every(isEngineRect)) return null;
+    const rects = position.rects.map((rect) => fromEngineRect(rect, page, box));
+    if (position.nextPageRects !== undefined) {
+      const nextPageBox = this.boxes[page];
+      if (
+        !Array.isArray(position.nextPageRects)
+        || !position.nextPageRects.every(isEngineRect)
+        || (position.nextPageRects.length > 0 && !isUsablePageBox(nextPageBox))
+      ) return null;
+      if (position.nextPageRects.length > 0 && nextPageBox) {
+        rects.push(...position.nextPageRects.map((rect) => fromEngineRect(rect, page + 1, nextPageBox)));
+      }
     }
     const converted: PdfAnnotation = {
       id: annotation.id ?? annotationId(),
@@ -295,6 +345,13 @@ export class IframeRillPdfEngine implements RillPdfEngine {
       rects,
       createdAt: annotation.dateCreated ?? new Date().toISOString(),
     };
-    return rillReadingOrderV2(converted).annotation;
+    const sanitizedGeometry = sanitizePersistedAnnotationGeometry(converted, this.boxes.length);
+    if (!sanitizedGeometry) return null;
+    const sanitized = {
+      ...converted,
+      page: sanitizedGeometry.page,
+      rects: [...sanitizedGeometry.rects, ...(sanitizedGeometry.nextPageRects ?? [])],
+    };
+    return rillReadingOrderV2(sanitized).annotation;
   }
 }

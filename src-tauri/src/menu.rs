@@ -4,7 +4,7 @@ use tauri::{
 };
 
 const MENU_EVENT: &str = "rill://menu-action";
-const SOURCE_AND_LICENSE_URL: &str = "https://github.com/Ikepersan/rill/tree/v1.0.0";
+const SOURCE_AND_LICENSE_URL: &str = "https://github.com/Ikepersan/rill/tree/v1.0.3";
 
 #[cfg(target_os = "macos")]
 fn open_source_and_license() {
@@ -61,6 +61,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         None::<&str>,
     )?;
+    let copy = MenuItem::with_id(app, "copy", "コピー", true, Some("CmdOrCtrl+C"))?;
     let quit = MenuItem::with_id(app, "quit", "Rillを終了", true, Some("CmdOrCtrl+Q"))?;
 
     let app_menu = Submenu::with_items(
@@ -103,7 +104,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &PredefinedMenuItem::redo(app, Some("やり直す"))?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, Some("切り取り"))?,
-            &PredefinedMenuItem::copy(app, Some("コピー"))?,
+            &copy,
             &PredefinedMenuItem::paste(app, Some("ペースト"))?,
             &PredefinedMenuItem::select_all(app, Some("すべてを選択"))?,
         ],
@@ -171,6 +172,7 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, id: &str) {
         "show-overview" => "overview",
         "show-library" => "library",
         "show-references" => "references",
+        "copy" => "copy",
         "quit" => "quit",
         _ => return,
     };

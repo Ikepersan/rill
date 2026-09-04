@@ -18,7 +18,33 @@ test("draft saves are serialized, revision guarded, and flushed before window cl
   assert.match(app, /event\.preventDefault\(\)/);
   assert.match(app, /await flushPendingEdits\(\)/);
   assert.match(app, /await readerFlush\.current\?\.\(\)/);
+  assert.match(app, /failedDraftSaves/);
+  assert.match(app, /for \(const failed of retries\)/);
+  assert.doesNotMatch(app, /setInterval\(refresh, 15_000\)/);
   assert.match(repository, /flush\(\)/);
+});
+
+test("paper moves and Trash wait for pending edits and retire obsolete save state", async () => {
+  const app = await read("desktop/src/App.tsx");
+
+  assert.match(
+    app,
+    /function retirePaperSaveState\(paperIds:[\s\S]*?queuedSaveByPaper\.current\.delete\(paperId\)[\s\S]*?failedDraftSaves\.current\.delete\(paperId\)[\s\S]*?latestRevisionByPaper\.current\.delete\(paperId\)/,
+  );
+  assert.match(
+    app,
+    /async function movePapersToFolder[\s\S]*?await flushPendingEdits\(\)[\s\S]*?applyMovedPapers\(moved\)/,
+  );
+  assert.match(
+    app,
+    /async function trashDraft[\s\S]*?await flushPendingEdits\(\)[\s\S]*?retireRemovedPapers\(\[paperId\]\)/,
+  );
+  assert.match(
+    app,
+    /async function trashSelectedPapers[\s\S]*?await flushPendingEdits\(\)[\s\S]*?retireRemovedPapers\(removedIds\)/,
+  );
+  assert.match(app, /変更を保存できないため、文献の移動を中止しました/);
+  assert.match(app, /変更を保存できないため、ゴミ箱への移動を中止しました/);
 });
 
 test("failed Trash moves retain recovery data unless every file is restored", async () => {
@@ -73,13 +99,16 @@ test("durable saves fsync temporary files and metadata enrichment preserves newe
   ]);
 
   assert.match(backend, /fn write_synced_then_rename/);
+  assert.match(backend, /fn unique_sibling_temporary_path/);
+  assert.match(backend, /\.create_new\(true\)/);
   assert.match(backend, /file\.sync_all\(\)/);
-  assert.match(backend, /write_synced_then_rename\(\s*&temporary,\s*&config/s);
-  assert.match(backend, /write_synced_then_rename\(\s*&temporary,\s*&note_path/s);
-  assert.match(backend, /write_synced_then_rename\(\s*&temporary,\s*&path/s);
+  assert.match(backend, /write_synced_then_rename\(\s*&config,/s);
+  assert.match(backend, /write_synced_then_rename\(\s*&note_path,/s);
+  assert.match(backend, /write_synced_then_rename\(\s*&path,/s);
+  assert.match(backend, /if result\.is_err\(\) \{\s+let _ = fs::remove_file\(&temporary\)/s);
   assert.match(frontend, /currentRevision !== requestedRevision/);
   assert.match(frontend, /取得中に行った編集を優先/);
-  assert.match(frontend, /savedPapers\.push\(await invoke<Paper>\("save_paper", \{ root, paper: enriched \}\)\)/);
+  assert.match(frontend, /await persistPaperMutation\(requestedPaper, \(\) => enriched\)/);
   assert.match(frontend, /skippedEditedCount/);
 });
 
@@ -93,5 +122,6 @@ test("stable paper identities survive external PDF renames and Trash round trips
   assert.match(backend, /duplicate_pdf_hashes_relink_only_the_missing_path/);
   assert.match(backend, /missing_or_corrupt_index_is_rebuilt_from_frontmatter/);
   assert.match(backend, /newer_index_version_is_not_overwritten/);
-  assert.match(backend, /duplicate_frontmatter_ids_do_not_rewrite_notes/);
+  assert.match(backend, /same_basename_pdfs_keep_separate_notes_and_identities/);
+  assert.match(backend, /annotation_save_restores_json_when_markdown_commit_fails/);
 });

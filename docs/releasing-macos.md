@@ -1,23 +1,33 @@
-# Rill macOS release
+# Release Rill for macOS
 
-Rill 1.0.0のローカル確認用ビルドと、署名済み配布用ビルドを分離する。
+Rill keeps local test builds separate from signed and notarized public builds.
 
-## 一度だけ行う準備
+## One-time setup
 
-1. Apple Developer Programで `Developer ID Application` 証明書を作成し、Keychainへ登録する。
-2. `security find-identity -p codesigning -v` で、証明書名とTeam IDを確認する。
-3. ノータライズ資格情報をKeychainへ保存する。
+1. Create a `Developer ID Application` certificate in the Apple Developer
+   account and install it, with its private key, in the login Keychain.
+2. Confirm the exact identity and Team ID:
 
-```sh
-xcrun notarytool store-credentials RillNotary \
-  --apple-id "APPLE ID" \
-  --team-id "TEAM ID" \
-  --password "APP-SPECIFIC PASSWORD"
-```
+   ```sh
+   security find-identity -p codesigning -v
+   ```
 
-パスワードや秘密鍵はリポジトリへ保存しない。
+3. Store notarization credentials in the Keychain:
 
-## 配布用ビルド
+   ```sh
+   xcrun notarytool store-credentials RillNotary \
+     --apple-id "APPLE ID" \
+     --team-id "TEAM ID" \
+     --password "APP-SPECIFIC PASSWORD"
+   ```
+
+Never store a password, private key, certificate export, or notarization token
+in the repository.
+
+## Public build
+
+Start from a clean, committed worktree with every recursive submodule checked
+out at the commit recorded by the release source.
 
 ```sh
 export APPLE_SIGNING_IDENTITY="Developer ID Application: YOUR NAME (TEAMID)"
@@ -25,18 +35,35 @@ export RILL_NOTARY_PROFILE="RillNotary"
 npm run release:macos
 ```
 
-この処理は、Developer ID署名、DMG生成、`notarytool submit --wait`、`stapler staple`、Gatekeeper検証を順番に行う。証明書が見つからない場合は、ad-hoc DMGを配布物として生成せず停止する。
+The release command signs the app, builds the DMG, submits it to Apple, staples
+the accepted ticket, verifies Gatekeeper acceptance, and creates
+`Rill_1.0.3_SHA256SUMS.txt`. It stops before producing a public artifact if the
+worktree is dirty, a submodule is missing or mismatched, or the identity or
+notarization profile is unavailable.
 
-プロジェクトのパスに日本語が含まれていても`stapler`がDMGを見失わないよう、ノータライズ工程ではDMGを一時的な英数字パスへ退避し、検証済みのDMGだけを元の成果物パスへ戻す。
+Run the final checks again before upload:
 
-## ローカル開発ビルド
+```sh
+npm run release:macos:check
+```
+
+The notarization step temporarily copies the DMG to an ASCII-only path because
+`stapler` can mishandle normalized Unicode in a project path. Only the verified,
+stapled DMG is copied back to the bundle directory.
+
+## Local development build
 
 ```sh
 npm run desktop:build
 ```
 
-通常ビルドは `tauri.conf.json` のad-hoc署名を使用する。これは開発確認専用であり、ネット配布には使用しない。
+The default configuration uses ad hoc signing. It is suitable for local testing
+only and must not be uploaded as a public release.
 
-## バージョン
+## Version rule
 
-現在の正式公開候補は `1.0.0` とする。`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` の3か所を同じ値に保ち、公開タグは署名・ノータライズ・実アプリ検証がすべて通った最終コミットへ付ける。
+The release version must match in `package.json`, `package-lock.json`,
+`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and
+`src-tauri/tauri.conf.json`. Create the public tag only after the signed DMG,
+notarization, native-app smoke test, and release checks all pass. Never move or
+reuse a published tag.

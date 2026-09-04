@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -7,7 +7,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import CSL from "citeproc";
 import cslStyles from "@citation-js/plugin-csl/lib/styles.json";
 import cslLocales from "@citation-js/plugin-csl/lib/locales.json";
-import { RillPdfReader } from "./RillPdfReader";
+
+const RillPdfReader = lazy(() => import("./RillPdfReader").then((module) => ({ default: module.RillPdfReader })));
 
 type View = "overview" | "library" | "references" | "reader";
 type SortMode = "追加日（新しい順）" | "追加日（古い順）" | "年（新しい順）" | "年（古い順）" | "タイトル" | "著者" | "読書状態" | "重要度";
@@ -283,7 +284,19 @@ function citationSurname(name: string) {
 
 function sentenceCase(value: string) {
   if (!value) return value;
-  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+  let firstWord = true;
+  return value.replace(/[\p{L}\p{N}][\p{L}\p{N}/-]*/gu, (word) => {
+    const hasAcronymCase = /[A-Z].*[A-Z]/.test(word) || /[a-z][A-Z]/.test(word);
+    const hasUppercaseIdentifier = /[A-Z]/.test(word) && /\d/.test(word);
+    if (hasAcronymCase || hasUppercaseIdentifier) {
+      firstWord = false;
+      return word;
+    }
+    const lower = word.toLocaleLowerCase("en");
+    if (!firstWord) return lower;
+    firstWord = false;
+    return lower.charAt(0).toLocaleUpperCase("en") + lower.slice(1);
+  });
 }
 
 function cslAuthor(name: string) {
@@ -398,12 +411,16 @@ export default function App() {
   const [ready, setReady] = useState(!isTauri);
   const [saveState, setSaveState] = useState("保存済み");
   const [folderDialog, setFolderDialog] = useState<{ parent: string; name: string; movePaperIds?: string[] } | null>(null);
+  const [renameFolderDialog, setRenameFolderDialog] = useState<{ collection: string; name: string } | null>(null);
   const [folderMenu, setFolderMenu] = useState<{ x: number; y: number; collection: string } | null>(null);
   const [paperMenu, setPaperMenu] = useState<{ x: number; y: number; paperIds: string[] } | null>(null);
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<string | null>(null);
   const [draggingPaperIds, setDraggingPaperIds] = useState<string[]>([]);
   const [folderDropTarget, setFolderDropTarget] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<{ x: number; y: number; title: string; count: number } | null>(null);
+  const [draggingCollection, setDraggingCollection] = useState<string | null>(null);
+  const [folderHierarchyDropTarget, setFolderHierarchyDropTarget] = useState<string | null>(null);
+  const [folderDragPreview, setFolderDragPreview] = useState<{ x: number; y: number; collection: string } | null>(null);
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("journal");
   const [citationOptions, setCitationOptions] = useState<CitationOptions>(defaultCitationOptions);
   const [citationPresets, setCitationPresets] = useState<CitationPreset[]>([]);
@@ -413,22 +430,27 @@ export default function App() {
   const [showObsidianSetup, setShowObsidianSetup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [pdfAvailability, setPdfAvailability] = useState<Record<string, boolean>>({});
+  const papersRef = useRef<Paper[]>(papers);
   const draftDirty = useRef(false);
   const draftRef = useRef<Paper | null>(null);
   const draftRevision = useRef(0);
   const latestRevisionByPaper = useRef(new Map<string, number>());
-  const queuedRevisionByPaper = useRef(new Map<string, number>());
+  const queuedSaveByPaper = useRef(new Map<string, { revision: number; operation: Promise<void> }>());
   const draftSaveQueue = useRef<Promise<void>>(Promise.resolve());
-  const draftSaveError = useRef<unknown>(null);
+  const failedDraftSaves = useRef(new Map<string, { snapshot: Paper; revision: number; error: unknown }>());
   const autoSaveTimer = useRef(0);
   const readerFlush = useRef<(() => Promise<void>) | null>(null);
   const closingAfterFlush = useRef(false);
   const lastSelectedId = useRef<string | null>(null);
   const pointerDrag = useRef<{ paperId: string; paperIds: string[]; startX: number; startY: number; active: boolean } | null>(null);
+  const folderPointerDrag = useRef<{ collection: string; startX: number; startY: number; active: boolean } | null>(null);
+  const collectionMutationInFlight = useRef(false);
   const suppressRowClick = useRef(false);
+  const suppressFolderClickUntil = useRef(0);
 
   const selected = papers.find((paper) => paper.id === selectedId) ?? null;
   const readerPaper = papers.find((paper) => paper.id === readerPaperId) ?? null;
+  papersRef.current = papers;
   draftRef.current = draft;
 
   useEffect(() => {
@@ -471,6 +493,10 @@ export default function App() {
       if (payload === "overview") setView("overview");
       if (payload === "library") setView("library");
       if (payload === "references") setView("references");
+      if (payload === "copy") {
+        const request = new Event("rill://copy-request", { cancelable: true });
+        if (window.dispatchEvent(request)) document.execCommand("copy");
+      }
       if (payload === "quit") void requestAppQuit();
     }).then((unlisten) => {
       if (disposed) unlisten();
@@ -556,10 +582,12 @@ export default function App() {
         void enqueueDraftSave(previousDraft, revision).catch(() => undefined);
       }
       lastSelectedId.current = selectedId;
-      const next = selected ? { ...selected, authors: [...selected.authors], tags: [...selected.tags] } : null;
-      draftDirty.current = false;
+      const failed = selected ? failedDraftSaves.current.get(selected.id) : undefined;
+      const source = failed?.snapshot ?? selected;
+      const next = source ? { ...source, authors: [...source.authors], tags: [...source.tags] } : null;
+      draftDirty.current = Boolean(failed);
       draftRef.current = next;
-      setSaveState("保存済み");
+      setSaveState(failed ? "保存エラー" : "保存済み");
       setDraft(next);
       return;
     }
@@ -618,14 +646,12 @@ export default function App() {
   useEffect(() => {
     if (!isTauri || !root || view === "reader") return;
     const refresh = () => {
-      if (!draftDirty.current && document.visibilityState === "visible") void loadLibrary(root, false);
+      if (!draftDirty.current && failedDraftSaves.current.size === 0 && document.visibilityState === "visible") {
+        void loadLibrary(root, false);
+      }
     };
-    const interval = window.setInterval(refresh, 15_000);
     window.addEventListener("focus", refresh);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
+    return () => window.removeEventListener("focus", refresh);
   }, [root, view]);
 
   useEffect(() => {
@@ -652,16 +678,19 @@ export default function App() {
         setFolderMenu(null);
         setPaperMenu(null);
         setFolderDialog(null);
+        setRenameFolderDialog(null);
         setDeleteFolderTarget(null);
         setShowObsidianSetup(false);
         setShowSettings(false);
         setShowAddDropZone(false);
       }
     };
-    window.addEventListener("click", closeMenu);
+    // Control+click on macOS emits pointerdown before contextmenu. Closing on the
+    // later click used to dismiss the menu immediately after it opened.
+    window.addEventListener("pointerdown", closeMenu);
     window.addEventListener("keydown", closeWithEscape);
     return () => {
-      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("pointerdown", closeMenu);
       window.removeEventListener("keydown", closeWithEscape);
     };
   }, []);
@@ -802,7 +831,7 @@ export default function App() {
   );
 
   async function loadLibrary(libraryRoot = root, notify = true) {
-    if (!isTauri || !libraryRoot) return;
+    if (!isTauri || !libraryRoot) return false;
     setBusy(true);
     try {
       await invoke("initialize_library", { root: libraryRoot });
@@ -819,8 +848,10 @@ export default function App() {
       if (selectedId && !loaded.some((paper) => paper.id === selectedId)) setSelectedId(null);
       setSelectedIds((current) => new Set(Array.from(current).filter((id) => loaded.some((paper) => paper.id === id))));
       if (notify) setToast(`${loaded.length}件の文献を読み込みました`);
+      return true;
     } catch (error) {
       setToast(String(error));
+      return false;
     } finally {
       setReady(true);
       setBusy(false);
@@ -889,6 +920,10 @@ export default function App() {
       }
       setView("library");
     } catch (error) {
+      // The backend validates a batch before copying, but a filesystem error can
+      // still occur after an earlier file was committed. Reconcile the UI with
+      // the library on disk instead of leaving a successfully imported PDF hidden.
+      await loadLibrary(root, false);
       setToast(String(error));
     } finally {
       setBusy(false);
@@ -896,15 +931,15 @@ export default function App() {
   }
 
   function enqueueDraftSave(snapshot: Paper, revision: number) {
-    const queuedRevision = queuedRevisionByPaper.current.get(snapshot.id) ?? -1;
-    if (queuedRevision >= revision) return draftSaveQueue.current;
-    queuedRevisionByPaper.current.set(snapshot.id, revision);
+    const queued = queuedSaveByPaper.current.get(snapshot.id);
+    if (queued && queued.revision >= revision) return queued.operation;
     const operation = draftSaveQueue.current.then(async () => {
       try {
         const saved = isTauri
           ? await invoke<Paper>("save_paper", { root, paper: snapshot })
           : snapshot;
-        draftSaveError.current = null;
+        const failed = failedDraftSaves.current.get(saved.id);
+        if (!failed || failed.revision <= revision) failedDraftSaves.current.delete(saved.id);
         if ((latestRevisionByPaper.current.get(saved.id) ?? revision) !== revision) return;
         setPapers((current) => current.map((paper) => (paper.id === saved.id ? saved : paper)));
         if (draftRef.current?.id === saved.id) {
@@ -914,22 +949,24 @@ export default function App() {
           setSaveState("保存済み");
         }
       } catch (error) {
-        draftSaveError.current = error;
-        if (
-          draftRef.current?.id === snapshot.id
-          && (latestRevisionByPaper.current.get(snapshot.id) ?? revision) === revision
-        ) {
+        const isLatest = (latestRevisionByPaper.current.get(snapshot.id) ?? revision) === revision;
+        if (isLatest) {
+          failedDraftSaves.current.set(snapshot.id, { snapshot, revision, error });
+          setPapers((current) => current.map((paper) => paper.id === snapshot.id ? snapshot : paper));
+          setToast(`${snapshot.title || "文献"}の変更を保存できませんでした: ${String(error)}`);
+        }
+        if (draftRef.current?.id === snapshot.id && isLatest) {
           draftDirty.current = true;
           setSaveState("保存エラー");
-          setToast(String(error));
         }
         throw error;
       } finally {
-        if (queuedRevisionByPaper.current.get(snapshot.id) === revision) {
-          queuedRevisionByPaper.current.delete(snapshot.id);
+        if (queuedSaveByPaper.current.get(snapshot.id)?.revision === revision) {
+          queuedSaveByPaper.current.delete(snapshot.id);
         }
       }
     });
+    queuedSaveByPaper.current.set(snapshot.id, { revision, operation });
     draftSaveQueue.current = operation.then(() => undefined, () => undefined);
     return operation;
   }
@@ -942,8 +979,14 @@ export default function App() {
       await enqueueDraftSave(currentDraft, revision);
     }
     await draftSaveQueue.current;
+    const retries = Array.from(failedDraftSaves.current.values());
+    for (const failed of retries) {
+      await enqueueDraftSave(failed.snapshot, failed.revision);
+    }
+    await draftSaveQueue.current;
     await readerFlush.current?.();
-    if (draftSaveError.current) throw draftSaveError.current;
+    const remaining = failedDraftSaves.current.values().next().value as { error: unknown } | undefined;
+    if (remaining) throw remaining.error;
   }
 
   async function requestAppQuit() {
@@ -975,12 +1018,86 @@ export default function App() {
     }
   }
 
-  function updateDraft(paper: Paper) {
+  function reservePaperRevision(paperId: string) {
     draftRevision.current += 1;
-    latestRevisionByPaper.current.set(paper.id, draftRevision.current);
+    latestRevisionByPaper.current.set(paperId, draftRevision.current);
+    return draftRevision.current;
+  }
+
+  function currentPaperSnapshot(paper: Paper) {
+    const current = draftRef.current?.id === paper.id
+      ? draftRef.current
+      : papersRef.current.find((item) => item.id === paper.id) ?? paper;
+    return { ...current, authors: [...current.authors], tags: [...current.tags] };
+  }
+
+  async function persistPaperMutation(
+    paper: Paper,
+    mutate: (current: Paper) => Paper,
+    successMessage?: string,
+  ) {
+    const updated = mutate(currentPaperSnapshot(paper));
+    const revision = reservePaperRevision(updated.id);
+    const optimisticPapers = papersRef.current.map((item) => item.id === updated.id ? updated : item);
+    papersRef.current = optimisticPapers;
+    setPapers(optimisticPapers);
+    if (draftRef.current?.id === updated.id) {
+      draftDirty.current = true;
+      draftRef.current = updated;
+      setDraft(updated);
+      setSaveState("保存中…");
+    }
+    window.clearTimeout(autoSaveTimer.current);
+    try {
+      await enqueueDraftSave(updated, revision);
+      if (successMessage) setToast(isTauri ? successMessage : `${successMessage}（プレビュー）`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function updateDraft(paper: Paper) {
+    reservePaperRevision(paper.id);
     draftDirty.current = true;
     draftRef.current = paper;
     setDraft(paper);
+  }
+
+  function retirePaperSaveState(paperIds: Iterable<string>) {
+    for (const paperId of paperIds) {
+      queuedSaveByPaper.current.delete(paperId);
+      failedDraftSaves.current.delete(paperId);
+      latestRevisionByPaper.current.delete(paperId);
+    }
+  }
+
+  function applyMovedPapers(moved: Paper[]) {
+    const movedById = new Map(moved.map((paper) => [paper.id, paper]));
+    const nextPapers = papersRef.current.map((paper) => movedById.get(paper.id) ?? paper);
+    papersRef.current = nextPapers;
+    setPapers(nextPapers);
+    const currentDraft = draftRef.current;
+    const movedDraft = currentDraft ? movedById.get(currentDraft.id) : undefined;
+    if (movedDraft) {
+      draftDirty.current = false;
+      draftRef.current = movedDraft;
+      setDraft(movedDraft);
+      setSaveState("保存済み");
+    }
+    retirePaperSaveState(movedById.keys());
+  }
+
+  function retireRemovedPapers(paperIds: Iterable<string>) {
+    const removedIds = new Set(paperIds);
+    retirePaperSaveState(removedIds);
+    if (draftRef.current && removedIds.has(draftRef.current.id)) {
+      window.clearTimeout(autoSaveTimer.current);
+      draftDirty.current = false;
+      draftRef.current = null;
+      setDraft(null);
+      setSaveState("保存済み");
+    }
   }
 
   async function enrichDraftMetadata() {
@@ -1023,23 +1140,33 @@ export default function App() {
 
   async function trashDraft() {
     if (!draft) return;
+    const paperId = draft.id;
     if (!window.confirm(`「${draft.title}」をRillのゴミ箱へ移動しますか？\n後から元の場所へ復元できます。`)) return;
-    if (!isTauri) {
-      setPapers((current) => current.filter((paper) => paper.id !== draft.id));
-      setTrashEntries((current) => [{ paper: draft, deletedAt: new Date().toISOString() }, ...current]);
-      setSelectedId(null);
-      setToast("Rillのゴミ箱へ移動しました（プレビュー）");
-      return;
-    }
     setBusy(true);
+    let trashStarted = false;
     try {
-      const entry = await invoke<TrashEntry>("move_paper_to_rill_trash", { root, paper: draft });
-      setPapers((current) => current.filter((paper) => paper.id !== draft.id));
+      await flushPendingEdits();
+      const target = papersRef.current.find((paper) => paper.id === paperId);
+      if (!target) return;
+      const snapshot = currentPaperSnapshot(target);
+      trashStarted = isTauri;
+      const entry = isTauri
+        ? await invoke<TrashEntry>("move_paper_to_rill_trash", { root, paper: snapshot })
+        : { paper: snapshot, deletedAt: new Date().toISOString() };
+      const nextPapers = papersRef.current.filter((paper) => paper.id !== paperId);
+      papersRef.current = nextPapers;
+      setPapers(nextPapers);
       setTrashEntries((current) => [entry, ...current.filter((item) => item.paper.id !== entry.paper.id)]);
+      retireRemovedPapers([paperId]);
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        next.delete(paperId);
+        return next;
+      });
       setSelectedId(null);
-      setToast("Rillのゴミ箱へ移動しました");
+      setToast(isTauri ? "Rillのゴミ箱へ移動しました" : "Rillのゴミ箱へ移動しました（プレビュー）");
     } catch (error) {
-      setToast(String(error));
+      setToast(trashStarted ? String(error) : `変更を保存できないため、ゴミ箱への移動を中止しました: ${String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -1066,6 +1193,126 @@ export default function App() {
     setFolderMenu(null);
     setPaperMenu(null);
     setFolderDialog({ parent, name: "", movePaperIds });
+  }
+
+  function openRenameFolder(collection: string) {
+    setFolderMenu(null);
+    setRenameFolderDialog({
+      collection,
+      name: collection.split("/").at(-1) ?? collection,
+    });
+  }
+
+  function remapCollectionPath(path: string, source: string, destination: string) {
+    if (path === source) return destination;
+    if (path.startsWith(`${source}/`)) return `${destination}${path.slice(source.length)}`;
+    return path;
+  }
+
+  function applyCollectionPathRemap(source: string, destination: string) {
+    setCollections((current) => current
+      .map((item) => remapCollectionPath(item, source, destination))
+      .sort((left, right) => left.localeCompare(right, "ja")));
+    setPapers((current) => current.map((paper) => ({
+      ...paper,
+      pdfPath: paper.pdfPath.startsWith(`Papers/${source}/`)
+        ? `Papers/${destination}/${paper.pdfPath.slice(`Papers/${source}/`.length)}`
+        : paper.pdfPath,
+    })));
+    setFolderFilter((current) => remapCollectionPath(current, source, destination));
+    setBulkDestination((current) => remapCollectionPath(current, source, destination));
+  }
+
+  async function applyCollectionMove(collection: string, destinationParent: string): Promise<boolean> {
+    if (collectionMutationInFlight.current) {
+      setToast("別のフォルダ操作が完了するまでお待ちください");
+      return false;
+    }
+    if (
+      destinationParent === collection
+      || destinationParent.startsWith(`${collection}/`)
+    ) {
+      setToast("フォルダを自分自身の中へ移動することはできません");
+      return false;
+    }
+    const name = collection.split("/").at(-1) ?? collection;
+    const destination = destinationParent ? `${destinationParent}/${name}` : name;
+    if (destination === collection) return false;
+
+    if (!isTauri) {
+      applyCollectionPathRemap(collection, destination);
+      setToast(`「${collection}」を「${destinationParent || "Papers直下"}」へ移動しました（プレビュー）`);
+      return true;
+    }
+
+    collectionMutationInFlight.current = true;
+    setBusy(true);
+    try {
+      await flushPendingEdits();
+      const moved = await invoke<string>("move_collection", {
+        root,
+        collection,
+        parent: destinationParent,
+      });
+      applyCollectionPathRemap(collection, moved);
+      if (!await loadLibrary(root, false)) {
+        setToast("フォルダは移動しましたが、一覧を再読込できませんでした。↻で再読込してください");
+        return true;
+      }
+      setToast(`「${collection}」を「${destinationParent || "Papers直下"}」へ移動しました`);
+      return true;
+    } catch (error) {
+      setToast(String(error));
+      return false;
+    } finally {
+      collectionMutationInFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function renameLibraryFolder(collection: string, name: string) {
+    if (collectionMutationInFlight.current) {
+      setToast("別のフォルダ操作が完了するまでお待ちください");
+      return;
+    }
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const parent = collection.includes("/") ? collection.slice(0, collection.lastIndexOf("/")) : "";
+    const expected = parent ? `${parent}/${trimmed}` : trimmed;
+    if (expected === collection) {
+      setRenameFolderDialog(null);
+      return;
+    }
+
+    if (!isTauri) {
+      applyCollectionPathRemap(collection, expected);
+      setRenameFolderDialog(null);
+      setToast(`「${collection}」を「${expected}」へ変更しました（プレビュー）`);
+      return;
+    }
+
+    collectionMutationInFlight.current = true;
+    setBusy(true);
+    try {
+      await flushPendingEdits();
+      const renamed = await invoke<string>("rename_collection", {
+        root,
+        collection,
+        name: trimmed,
+      });
+      applyCollectionPathRemap(collection, renamed);
+      setRenameFolderDialog(null);
+      if (!await loadLibrary(root, false)) {
+        setToast("フォルダ名は変更しましたが、一覧を再読込できませんでした。↻で再読込してください");
+        return;
+      }
+      setToast(`フォルダ名を「${trimmed}」へ変更しました`);
+    } catch (error) {
+      setToast(String(error));
+    } finally {
+      collectionMutationInFlight.current = false;
+      setBusy(false);
+    }
   }
 
   async function createLibraryFolder(parent: string, name: string, movePaperIds: string[] = []) {
@@ -1112,37 +1359,41 @@ export default function App() {
   }
 
   async function movePapersToFolder(paperIds: string[], collection: string): Promise<boolean> {
-    const targets = papers.filter((paper) => paperIds.includes(paper.id));
-    if (targets.length === 0) return false;
+    const requestedIds = new Set(paperIds);
+    if (!papersRef.current.some((paper) => requestedIds.has(paper.id))) return false;
     const backendCollection = collection === "__unfiled" ? "__inbox" : collection;
-    if (!isTauri) {
-      const moved = targets.map((paper) => {
-        const filename = paper.pdfPath.split("/").at(-1) ?? "paper.pdf";
-        const destination = backendCollection === "__inbox" ? `Inbox/${filename}` : backendCollection ? `Papers/${backendCollection}/${filename}` : `Papers/${filename}`;
-        return { ...paper, pdfPath: destination };
-      });
-      setPapers((current) => current.map((paper) => moved.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(moved.find((paper) => paper.id === draft.id) ?? draft);
-      const destination = collection === "__unfiled" ? "未整理" : collection || "Papers";
-      setToast(`${targets.length}件を「${destination}」へ移動しました（プレビュー）`);
-      setDraggingPaperIds([]);
-      setFolderDropTarget(null);
-      setDragPreview(null);
-      return true;
-    }
     setBusy(true);
+    let moveStarted = false;
     try {
-      const moved: Paper[] = [];
-      for (const paper of targets) {
-        moved.push(await invoke<Paper>("move_paper_to_collection", { root, paper, collection: backendCollection }));
+      await flushPendingEdits();
+      const targets = papersRef.current
+        .filter((paper) => requestedIds.has(paper.id))
+        .map(currentPaperSnapshot);
+      if (targets.length === 0) return false;
+      let moved: Paper[];
+      if (isTauri) {
+        moveStarted = true;
+        moved = [];
+        for (const paper of targets) {
+          moved.push(await invoke<Paper>("move_paper_to_collection", { root, paper, collection: backendCollection }));
+        }
+      } else {
+        moved = targets.map((paper) => {
+          const filename = paper.pdfPath.split("/").at(-1) ?? "paper.pdf";
+          const destination = backendCollection === "__inbox" ? `Inbox/${filename}` : backendCollection ? `Papers/${backendCollection}/${filename}` : `Papers/${filename}`;
+          return { ...paper, pdfPath: destination };
+        });
       }
-      setPapers((current) => current.map((paper) => moved.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(moved.find((paper) => paper.id === draft.id) ?? draft);
+      applyMovedPapers(moved);
       const destination = collection === "__unfiled" ? "未整理" : collection || "Papers";
-      setToast(`${targets.length}件を「${destination}」へ移動しました`);
+      const suffix = isTauri ? "" : "（プレビュー）";
+      setToast(`${targets.length}件を「${destination}」へ移動しました${suffix}`);
       return true;
     } catch (error) {
-      setToast(String(error));
+      // Moving several papers is not transactional. If a later move fails, an
+      // earlier one may already be on disk, so reload before reporting failure.
+      if (moveStarted) await loadLibrary(root, false);
+      setToast(moveStarted ? String(error) : `変更を保存できないため、文献の移動を中止しました: ${String(error)}`);
       return false;
     } finally {
       setBusy(false);
@@ -1166,9 +1417,9 @@ export default function App() {
   }
 
   async function enrichSelectedPapers(paperIds = Array.from(selectedIds)) {
-    const targets = papers
+    const targets = papersRef.current
       .filter((paper) => paperIds.includes(paper.id))
-      .map((paper) => (draft?.id === paper.id ? draft : paper));
+      .map(currentPaperSnapshot);
     setPaperMenu(null);
     if (targets.length === 0) return;
     if (!isTauri) {
@@ -1176,38 +1427,25 @@ export default function App() {
       return;
     }
     setBusy(true);
-    const savedPapers: Paper[] = [];
     let failedCount = 0;
     let skippedEditedCount = 0;
     for (const [index, paper] of targets.entries()) {
       setToast(`書誌情報を取得中… ${index + 1}/${targets.length}`);
       try {
-        const currentDraft = draftRef.current?.id === paper.id ? draftRef.current : null;
-        const requestedPaper = currentDraft
-          ? { ...currentDraft, authors: [...currentDraft.authors], tags: [...currentDraft.tags] }
-          : paper;
-        const requestedRevision = currentDraft
-          ? latestRevisionByPaper.current.get(paper.id) ?? draftRevision.current
-          : null;
+        const requestedPaper = currentPaperSnapshot(paper);
+        const requestedRevision = latestRevisionByPaper.current.get(paper.id) ?? 0;
         const enriched = await invoke<Paper>("enrich_metadata", { root, paper: requestedPaper });
-        if (requestedRevision !== null) {
-          const currentRevision = latestRevisionByPaper.current.get(paper.id) ?? requestedRevision;
-          if (currentRevision !== requestedRevision || draftRef.current?.id !== paper.id) {
-            skippedEditedCount += 1;
-            continue;
-          }
-          updateDraft(enriched);
-          const enrichedRevision = latestRevisionByPaper.current.get(enriched.id) ?? draftRevision.current;
-          await enqueueDraftSave(enriched, enrichedRevision);
-        } else {
-          savedPapers.push(await invoke<Paper>("save_paper", { root, paper: enriched }));
+        const currentRevision = latestRevisionByPaper.current.get(paper.id) ?? 0;
+        if (currentRevision !== requestedRevision) {
+          skippedEditedCount += 1;
+          continue;
+        }
+        if (!await persistPaperMutation(requestedPaper, () => enriched)) {
+          failedCount += 1;
         }
       } catch {
         failedCount += 1;
       }
-    }
-    if (savedPapers.length > 0) {
-      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
     }
     setBusy(false);
     const savedCount = targets.length - failedCount - skippedEditedCount;
@@ -1216,142 +1454,118 @@ export default function App() {
     } else if (failedCount === 0) {
       setToast(`${savedCount}件の書誌情報を取得しました`);
     } else {
-      setToast(`${savedCount}件を取得、${failedCount}件は候補を特定できませんでした`);
+      setToast(`${savedCount}件を取得、${failedCount}件は取得または保存できませんでした`);
     }
   }
 
   async function markSelectedPapersAsRead(paperIds = Array.from(selectedIds)) {
-    const targets = papers
+    const targets = papersRef.current
       .filter((paper) => paperIds.includes(paper.id) && paper.status !== "読了")
-      .map((paper) => (draft?.id === paper.id ? draft : paper));
+      .map(currentPaperSnapshot);
     if (targets.length === 0) {
       setToast("選択した文献はすべて読了です");
       return;
     }
-    if (!isTauri) {
-      const targetIds = new Set(targets.map((paper) => paper.id));
-      setPapers((current) => current.map((paper) => targetIds.has(paper.id) ? { ...paper, status: "読了" } : paper));
-      if (draft && targetIds.has(draft.id)) setDraft({ ...draft, status: "読了" });
-      setToast(`${targets.length}件を読了にしました（プレビュー）`);
-      return;
-    }
     setBusy(true);
-    const savedPapers: Paper[] = [];
     let failedCount = 0;
     for (const paper of targets) {
-      try {
-        savedPapers.push(await invoke<Paper>("save_paper", { root, paper: { ...paper, status: "読了" } }));
-      } catch {
+      if (!await persistPaperMutation(paper, (current) => ({ ...current, status: "読了" }))) {
         failedCount += 1;
       }
     }
-    if (savedPapers.length > 0) {
-      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(savedPapers.find((paper) => paper.id === draft.id) ?? draft);
-    }
     setBusy(false);
-    if (failedCount === 0) setToast(`${savedPapers.length}件を読了にしました`);
-    else setToast(`${savedPapers.length}件を読了、${failedCount}件は保存できませんでした`);
+    const suffix = isTauri ? "" : "（プレビュー）";
+    if (failedCount === 0) setToast(`${targets.length}件を読了にしました${suffix}`);
+    else setToast(`${targets.length}件を読了に変更、${failedCount}件は保存待ちです`);
   }
 
   async function addSelectedPapersToReferences(paperIds = Array.from(selectedIds)) {
-    const paperById = new Map(papers.map((paper) => [paper.id, paper]));
+    const paperById = new Map(papersRef.current.map((paper) => [paper.id, paper]));
     const targets = paperIds
       .map((paperId) => paperById.get(paperId))
       .filter((paper): paper is Paper => Boolean(paper && !paper.isReference))
-      .map((paper) => (draft?.id === paper.id ? draft : paper));
+      .map(currentPaperSnapshot);
     if (targets.length === 0) {
       setToast("選択した文献はすべて参考文献に追加済みです");
       return;
     }
 
-    if (!isTauri) {
-      const targetIds = new Set(targets.map((paper) => paper.id));
-      setPapers((current) => current.map((paper) => targetIds.has(paper.id) ? { ...paper, isReference: true } : paper));
-      if (draft && targetIds.has(draft.id)) setDraft({ ...draft, isReference: true });
-      setReferenceOrder((current) => {
-        const known = current.filter((id) => papers.some((paper) => paper.id === id && paper.isReference));
-        const next = [...known, ...targets.map((paper) => paper.id).filter((id) => !known.includes(id))];
-        localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
-        return next;
-      });
-      setToast(`${targets.length}件を参考文献に追加しました（プレビュー）`);
-      return;
-    }
-
+    setReferenceOrder((current) => {
+      const existingReferenceIds = papersRef.current.filter((paper) => paper.isReference).map((paper) => paper.id);
+      const known = [...current.filter((id) => existingReferenceIds.includes(id)), ...existingReferenceIds.filter((id) => !current.includes(id))];
+      const next = [...known, ...targets.map((paper) => paper.id).filter((id) => !known.includes(id))];
+      localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
+      return next;
+    });
     setBusy(true);
-    const savedPapers: Paper[] = [];
     let failedCount = 0;
     for (const paper of targets) {
-      try {
-        savedPapers.push(await invoke<Paper>("save_paper", { root, paper: { ...paper, isReference: true } }));
-      } catch {
+      if (!await persistPaperMutation(paper, (current) => ({ ...current, isReference: true }))) {
         failedCount += 1;
       }
     }
-    if (savedPapers.length > 0) {
-      const savedIds = new Set(savedPapers.map((paper) => paper.id));
-      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft && savedIds.has(draft.id)) setDraft(savedPapers.find((paper) => paper.id === draft.id) ?? draft);
-      setReferenceOrder((current) => {
-        const existingReferenceIds = papers.filter((paper) => paper.isReference).map((paper) => paper.id);
-        const known = [...current.filter((id) => existingReferenceIds.includes(id)), ...existingReferenceIds.filter((id) => !current.includes(id))];
-        const next = [...known, ...savedPapers.map((paper) => paper.id).filter((id) => !known.includes(id))];
-        localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
-        return next;
-      });
-    }
     setBusy(false);
-    if (failedCount === 0) setToast(`${savedPapers.length}件を参考文献に追加しました`);
-    else setToast(`${savedPapers.length}件を参考文献に追加、${failedCount}件は保存できませんでした`);
+    const suffix = isTauri ? "" : "（プレビュー）";
+    if (failedCount === 0) setToast(`${targets.length}件を参考文献に追加しました${suffix}`);
+    else setToast(`${targets.length}件を参考文献に追加、${failedCount}件は保存待ちです`);
   }
 
   async function trashSelectedPapers(paperIds = Array.from(selectedIds)) {
     setPaperMenu(null);
-    const targets = papers.filter((paper) => paperIds.includes(paper.id));
-    if (targets.length === 0) return;
-    const message = targets.length === 1
-      ? `「${targets[0].title}」をRillのゴミ箱へ移動しますか？\n後から元の場所へ復元できます。`
-      : `選択した${targets.length}件をRillのゴミ箱へ移動しますか？\n後から元の場所へ復元できます。`;
+    const requestedIds = new Set(paperIds);
+    const initialTargets = papersRef.current.filter((paper) => requestedIds.has(paper.id));
+    if (initialTargets.length === 0) return;
+    const message = initialTargets.length === 1
+      ? `「${initialTargets[0].title}」をRillのゴミ箱へ移動しますか？\n後から元の場所へ復元できます。`
+      : `選択した${initialTargets.length}件をRillのゴミ箱へ移動しますか？\n後から元の場所へ復元できます。`;
     if (!window.confirm(message)) return;
-    if (!isTauri) {
-      const ids = new Set(targets.map((paper) => paper.id));
-      setPapers((current) => current.filter((paper) => !ids.has(paper.id)));
-      setTrashEntries((current) => [
-        ...targets.map((paper) => ({ paper, deletedAt: new Date().toISOString() })),
-        ...current.filter((entry) => !ids.has(entry.paper.id)),
-      ]);
-      clearPaperSelection();
-      setToast(`${targets.length}件をRillのゴミ箱へ移動しました（プレビュー）`);
-      return;
-    }
     setBusy(true);
     const removedIds = new Set<string>();
     const movedEntries: TrashEntry[] = [];
     const failed: string[] = [];
-    for (const paper of targets) {
-      try {
-        const entry = await invoke<TrashEntry>("move_paper_to_rill_trash", { root, paper });
-        removedIds.add(paper.id);
-        movedEntries.push(entry);
-      } catch (error) {
-        failed.push(`${paper.title}: ${String(error)}`);
+    try {
+      await flushPendingEdits();
+      const targets = papersRef.current
+        .filter((paper) => requestedIds.has(paper.id))
+        .map(currentPaperSnapshot);
+      if (!isTauri) {
+        for (const paper of targets) {
+          removedIds.add(paper.id);
+          movedEntries.push({ paper, deletedAt: new Date().toISOString() });
+        }
+      } else {
+        for (const paper of targets) {
+          try {
+            const entry = await invoke<TrashEntry>("move_paper_to_rill_trash", { root, paper });
+            removedIds.add(paper.id);
+            movedEntries.push(entry);
+          } catch (error) {
+            failed.push(`${paper.title}: ${String(error)}`);
+          }
+        }
       }
+      const nextPapers = papersRef.current.filter((paper) => !removedIds.has(paper.id));
+      papersRef.current = nextPapers;
+      setPapers(nextPapers);
+      setTrashEntries((current) => [
+        ...movedEntries,
+        ...current.filter((entry) => !removedIds.has(entry.paper.id)),
+      ]);
+      retireRemovedPapers(removedIds);
+      if (failed.length === 0) {
+        clearPaperSelection();
+        const suffix = isTauri ? "" : "（プレビュー）";
+        setToast(`${removedIds.size}件をRillのゴミ箱へ移動しました${suffix}`);
+      } else {
+        setSelectedIds(new Set(targets.filter((paper) => !removedIds.has(paper.id)).map((paper) => paper.id)));
+        if (selectedId && removedIds.has(selectedId)) setSelectedId(null);
+        setToast(`${removedIds.size}件をゴミ箱へ移動、${failed.length}件は移動できませんでした`);
+      }
+    } catch (error) {
+      setToast(`変更を保存できないため、ゴミ箱への移動を中止しました: ${String(error)}`);
+    } finally {
+      setBusy(false);
     }
-    setPapers((current) => current.filter((paper) => !removedIds.has(paper.id)));
-    setTrashEntries((current) => [
-      ...movedEntries,
-      ...current.filter((entry) => !removedIds.has(entry.paper.id)),
-    ]);
-    if (failed.length === 0) {
-      clearPaperSelection();
-      setToast(`${removedIds.size}件をRillのゴミ箱へ移動しました`);
-    } else {
-      setSelectedIds(new Set(targets.filter((paper) => !removedIds.has(paper.id)).map((paper) => paper.id)));
-      if (selectedId && removedIds.has(selectedId)) setSelectedId(null);
-      setToast(`${removedIds.size}件をゴミ箱へ移動、${failed.length}件は移動できませんでした`);
-    }
-    setBusy(false);
   }
 
   async function restoreTrashEntry(entry: TrashEntry) {
@@ -1502,6 +1716,80 @@ export default function App() {
     window.addEventListener("pointercancel", cancel);
   }
 
+  function beginFolderDrag(event: ReactPointerEvent<HTMLButtonElement>, collection: string) {
+    if (
+      event.button !== 0
+      || event.ctrlKey
+      || event.metaKey
+      || busy
+      || collectionMutationInFlight.current
+      || folderPointerDrag.current
+    ) return;
+    const currentParent = collection.includes("/")
+      ? collection.slice(0, collection.lastIndexOf("/"))
+      : "";
+    folderPointerDrag.current = {
+      collection,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+
+    const preventTextSelection = (selectionEvent: Event) => selectionEvent.preventDefault();
+    const cleanup = () => {
+      window.removeEventListener("pointermove", track);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      document.removeEventListener("selectstart", preventTextSelection);
+      document.body.classList.remove("folder-drag-active");
+      window.getSelection()?.removeAllRanges();
+    };
+    const validTargetAt = (x: number, y: number) => {
+      const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-folder-reparent-target]");
+      const parent = target?.getAttribute("data-folder-reparent-target");
+      if (parent === null || parent === undefined) return null;
+      if (parent === collection || parent.startsWith(`${collection}/`)) return null;
+      if (parent === currentParent) return null;
+      return parent;
+    };
+    const track = (moveEvent: PointerEvent) => {
+      const drag = folderPointerDrag.current;
+      if (!drag) return;
+      if (!drag.active && Math.hypot(moveEvent.clientX - drag.startX, moveEvent.clientY - drag.startY) > 7) {
+        drag.active = true;
+        document.addEventListener("selectstart", preventTextSelection);
+        document.body.classList.add("folder-drag-active");
+        setDraggingCollection(collection);
+      }
+      if (!drag.active) return;
+      moveEvent.preventDefault();
+      setFolderDragPreview({ x: moveEvent.clientX, y: moveEvent.clientY, collection });
+      setFolderHierarchyDropTarget(validTargetAt(moveEvent.clientX, moveEvent.clientY));
+    };
+    const finish = (upEvent: PointerEvent) => {
+      const drag = folderPointerDrag.current;
+      const destinationParent = drag?.active ? validTargetAt(upEvent.clientX, upEvent.clientY) : null;
+      cleanup();
+      folderPointerDrag.current = null;
+      if (!drag?.active) return;
+      suppressFolderClickUntil.current = window.performance.now() + 100;
+      setDraggingCollection(null);
+      setFolderHierarchyDropTarget(null);
+      setFolderDragPreview(null);
+      if (destinationParent !== null) void applyCollectionMove(collection, destinationParent);
+    };
+    const cancel = () => {
+      cleanup();
+      folderPointerDrag.current = null;
+      setDraggingCollection(null);
+      setFolderHierarchyDropTarget(null);
+      setFolderDragPreview(null);
+    };
+    window.addEventListener("pointermove", track);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+  }
+
   async function openPaperViewer(paper: Paper) {
     if (!isTauri) {
       setToast("MacアプリでPDFビューワーを利用できます");
@@ -1516,10 +1804,8 @@ export default function App() {
       }
       setReaderPaperId(paper.id);
       setView("reader");
-      if (paper.status === "未読") {
-        const saved = await invoke<Paper>("save_paper", { root, paper: { ...paper, status: "読書中" } });
-        setDraft(saved);
-        setPapers((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+      if (currentPaperSnapshot(paper).status === "未読") {
+        await persistPaperMutation(paper, (current) => ({ ...current, status: "読書中" }));
       }
     } catch (error) {
       setToast(String(error));
@@ -1537,43 +1823,20 @@ export default function App() {
 
   async function changeReadingStatus(status: string) {
     if (!draft || draft.status === status) return;
-    const updated = { ...draft, status };
-    draftDirty.current = false;
-    setDraft(updated);
-    setPapers((current) => current.map((paper) => (paper.id === updated.id ? updated : paper)));
-    if (!isTauri) {
-      setToast(`${status}に変更しました（プレビュー）`);
-      return;
-    }
-    try {
-      const saved = await invoke<Paper>("save_paper", { root, paper: updated });
-      setDraft(saved);
-      setPapers((current) => current.map((paper) => (paper.id === saved.id ? saved : paper)));
-      setToast(`${status}に変更しました`);
-    } catch (error) {
-      setToast(String(error));
-    }
+    await persistPaperMutation(draft, (current) => ({ ...current, status }), `${status}に変更しました`);
   }
 
   async function toggleReference(paper: Paper) {
-    const updated = { ...paper, isReference: !paper.isReference };
+    const currentPaper = currentPaperSnapshot(paper);
+    const isReference = !currentPaper.isReference;
     setReferenceOrder((current) => {
-      const existingReferenceIds = papers.filter((item) => item.isReference && item.id !== paper.id).map((item) => item.id);
+      const existingReferenceIds = papersRef.current.filter((item) => item.isReference && item.id !== paper.id).map((item) => item.id);
       const knownIds = [...current.filter((id) => existingReferenceIds.includes(id)), ...existingReferenceIds.filter((id) => !current.includes(id))];
-      const next = updated.isReference ? [...knownIds, paper.id] : current.filter((id) => id !== paper.id);
+      const next = isReference ? [...knownIds, paper.id] : current.filter((id) => id !== paper.id);
       localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
       return next;
     });
-    setPapers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    if (draft?.id === updated.id) setDraft(updated);
-    if (!isTauri) return;
-    try {
-      const saved = await invoke<Paper>("save_paper", { root, paper: updated });
-      setPapers((current) => current.map((item) => (item.id === saved.id ? saved : item)));
-      if (draft?.id === saved.id) setDraft(saved);
-    } catch (error) {
-      setToast(String(error));
-    }
+    await persistPaperMutation(currentPaper, (current) => ({ ...current, isReference }));
   }
 
   function moveReference(paper: Paper, direction: "up" | "down") {
@@ -1601,94 +1864,55 @@ export default function App() {
   async function addTagsToReferences(targets: Paper[], tagInput: string): Promise<boolean> {
     const addedTags = parseTags(tagInput);
     if (targets.length === 0 || addedTags.length === 0) return false;
-    const updatedPapers = targets.map((paper) => ({ ...paper, tags: Array.from(new Set([...paper.tags, ...addedTags])) }));
-    if (!isTauri) {
-      setPapers((current) => current.map((paper) => updatedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(updatedPapers.find((paper) => paper.id === draft.id) ?? draft);
-      setToast(`${targets.length}件に${addedTags.length}個のタグを追加しました（プレビュー）`);
-      return true;
-    }
+    const currentTargets = targets.map(currentPaperSnapshot);
     setBusy(true);
-    const savedPapers: Paper[] = [];
     let failedCount = 0;
-    for (const paper of updatedPapers) {
-      try {
-        savedPapers.push(await invoke<Paper>("save_paper", { root, paper }));
-      } catch {
+    for (const paper of currentTargets) {
+      if (!await persistPaperMutation(paper, (current) => ({
+        ...current,
+        tags: Array.from(new Set([...current.tags, ...addedTags])),
+      }))) {
         failedCount += 1;
       }
     }
-    if (savedPapers.length > 0) {
-      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(savedPapers.find((paper) => paper.id === draft.id) ?? draft);
-    }
     setBusy(false);
-    if (failedCount === 0) setToast(`${savedPapers.length}件に${addedTags.length}個のタグを追加しました`);
-    else setToast(`${savedPapers.length}件に追加、${failedCount}件は保存できませんでした`);
-    return savedPapers.length > 0;
+    const suffix = isTauri ? "" : "（プレビュー）";
+    if (failedCount === 0) setToast(`${currentTargets.length}件に${addedTags.length}個のタグを追加しました${suffix}`);
+    else setToast(`${currentTargets.length}件にタグを追加、${failedCount}件は保存待ちです`);
+    return true;
   }
 
   async function removeAllReferences(targets: Paper[]) {
     if (targets.length === 0) return;
     if (!window.confirm(`${targets.length}件を参考文献から外しますか？\nPDFとMarkdownはLibraryに残ります。`)) return;
-    const updatedPapers = targets.map((paper) => ({ ...paper, isReference: false }));
-    const removedIds = new Set(targets.map((paper) => paper.id));
+    const currentTargets = targets.map(currentPaperSnapshot);
+    const removedIds = new Set(currentTargets.map((paper) => paper.id));
     setReferenceOrder((current) => {
       const next = current.filter((id) => !removedIds.has(id));
       localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
       return next;
     });
-    if (!isTauri) {
-      setPapers((current) => current.map((paper) => updatedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(updatedPapers.find((paper) => paper.id === draft.id) ?? draft);
-      setToast(`${targets.length}件を参考文献から外しました（プレビュー）`);
-      return;
-    }
     setBusy(true);
-    const savedPapers: Paper[] = [];
     let failedCount = 0;
-    for (const paper of updatedPapers) {
-      try {
-        savedPapers.push(await invoke<Paper>("save_paper", { root, paper }));
-      } catch {
+    for (const paper of currentTargets) {
+      if (!await persistPaperMutation(paper, (current) => ({ ...current, isReference: false }))) {
         failedCount += 1;
       }
     }
-    if (savedPapers.length > 0) {
-      setPapers((current) => current.map((paper) => savedPapers.find((item) => item.id === paper.id) ?? paper));
-      if (draft) setDraft(savedPapers.find((paper) => paper.id === draft.id) ?? draft);
-    }
     setBusy(false);
-    if (failedCount === 0) setToast(`${savedPapers.length}件を参考文献から外しました`);
-    else setToast(`${savedPapers.length}件を解除、${failedCount}件は保存できませんでした`);
+    const suffix = isTauri ? "" : "（プレビュー）";
+    if (failedCount === 0) setToast(`${currentTargets.length}件を参考文献から外しました${suffix}`);
+    else setToast(`${currentTargets.length}件を参考文献から解除、${failedCount}件は保存待ちです`);
   }
 
   async function changeFlag(paper: Paper, flagColor: string) {
-    const updated = { ...paper, flagColor };
-    setPapers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    if (draft?.id === updated.id) setDraft(updated);
-    if (!isTauri) return;
-    try {
-      const saved = await invoke<Paper>("save_paper", { root, paper: updated });
-      setPapers((current) => current.map((item) => (item.id === saved.id ? saved : item)));
-      if (draft?.id === saved.id) setDraft(saved);
-    } catch (error) {
-      setToast(String(error));
-    }
+    if (currentPaperSnapshot(paper).flagColor === flagColor) return;
+    await persistPaperMutation(paper, (current) => ({ ...current, flagColor }));
   }
 
   async function toggleFavorite(paper: Paper) {
-    const updated = { ...paper, isFavorite: !paper.isFavorite };
-    setPapers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    if (draft?.id === updated.id) setDraft(updated);
-    if (!isTauri) return;
-    try {
-      const saved = await invoke<Paper>("save_paper", { root, paper: updated });
-      setPapers((current) => current.map((item) => (item.id === saved.id ? saved : item)));
-      if (draft?.id === saved.id) setDraft(saved);
-    } catch (error) {
-      setToast(String(error));
-    }
+    const isFavorite = !currentPaperSnapshot(paper).isFavorite;
+    await persistPaperMutation(paper, (current) => ({ ...current, isFavorite }));
   }
 
   async function openPaperNote(paper: Paper) {
@@ -1817,14 +2041,16 @@ export default function App() {
       )}
 
       {view === "reader" && readerPaper ? (
-        <RillPdfReader
-          root={root}
-          paper={readerPaper}
-          onClose={() => setView("library")}
-          onOpenExternal={() => void openPaperExternal(readerPaper)}
-          onToast={setToast}
-          onRegisterFlush={(flush) => { readerFlush.current = flush; }}
-        />
+        <Suspense fallback={<section className="reader-view"><div className="pdf-loading"><span>PDF</span><p>リーダーを準備しています…</p></div></section>}>
+          <RillPdfReader
+            root={root}
+            paper={readerPaper}
+            onClose={() => setView("library")}
+            onOpenExternal={() => void openPaperExternal(readerPaper)}
+            onToast={setToast}
+            onRegisterFlush={(flush) => { readerFlush.current = flush; }}
+          />
+        </Suspense>
       ) : view === "overview" ? (
         <Overview
           papers={papers}
@@ -1867,10 +2093,25 @@ export default function App() {
               <p className="sidebar-heading">フォルダ</p>
               <button type="button" onClick={() => openCreateFolder(folderFilter && !folderFilter.startsWith("__") ? folderFilter : "")} title={folderFilter && !folderFilter.startsWith("__") ? "選択中のフォルダ内に作成" : "新しいフォルダを作成"}>＋</button>
             </div>
-            <button className={folderFilter === "" ? "active collection-button" : "collection-button"} onContextMenu={(event) => { event.preventDefault(); setFolderMenu({ x: event.clientX, y: event.clientY, collection: "" }); }} onClick={() => setFolderFilter("")}>
+            <button
+              data-folder-target=""
+              data-folder-reparent-target=""
+              className={`${folderFilter === "" ? "active " : ""}${folderDropTarget === "" ? "drop-target " : ""}${folderHierarchyDropTarget === "" ? "hierarchy-drop-target " : ""}collection-button`}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setPaperMenu(null);
+                setFolderMenu({
+                  x: Math.max(8, Math.min(event.clientX, window.innerWidth - 200)),
+                  y: Math.max(8, Math.min(event.clientY, window.innerHeight - 110)),
+                  collection: "",
+                });
+              }}
+              onClick={(event) => { if (!event.ctrlKey) setFolderFilter(""); }}
+            >
               <span>▾</span><b>すべての文献</b><i>{papers.length}</i>
             </button>
-            <button data-folder-target="__unfiled" title="まだ専用フォルダへ分類していない文献" className={`${folderFilter === "__unfiled" ? "active " : ""}${folderDropTarget === "__unfiled" ? "drop-target " : ""}collection-button`} onContextMenu={(event) => { event.preventDefault(); setFolderMenu({ x: event.clientX, y: event.clientY, collection: "" }); }} onClick={() => setFolderFilter("__unfiled")}>
+            <button data-folder-target="__unfiled" title="まだ専用フォルダへ分類していない文献" className={`${folderFilter === "__unfiled" ? "active " : ""}${folderDropTarget === "__unfiled" ? "drop-target " : ""}collection-button`} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setPaperMenu(null); setFolderMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 200)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 110)), collection: "" }); }} onClick={(event) => { if (!event.ctrlKey) setFolderFilter("__unfiled"); }}>
               <span>⌑</span><b>未整理</b><i>{papers.filter((paper) => paper.pdfPath.startsWith("Inbox/") || (paper.pdfPath.startsWith("Papers/") && paper.pdfPath.split("/").length === 2)).length}</i>
             </button>
             {collections.map((collection) => {
@@ -1878,7 +2119,33 @@ export default function App() {
               const name = collection.split("/").at(-1) ?? collection;
               const count = papers.filter((paper) => paper.pdfPath.startsWith(`Papers/${collection}/`)).length;
               return (
-                <button key={collection} data-folder-target={collection} title={`${collection}（右クリックで操作）`} style={{ paddingLeft: `${10 + depth * 14}px` }} className={`${folderFilter === collection ? "active " : ""}${folderDropTarget === collection ? "drop-target " : ""}collection-button`} onContextMenu={(event) => { event.preventDefault(); setFolderMenu({ x: event.clientX, y: event.clientY, collection }); }} onClick={() => setFolderFilter(collection)}>
+                <button
+                  key={collection}
+                  data-folder-target={collection}
+                  data-folder-reparent-target={collection}
+                  title={`${collection}（右クリックで操作、ドラッグで階層を変更）`}
+                  style={{ paddingLeft: `${10 + depth * 14}px` }}
+                  className={`${folderFilter === collection ? "active " : ""}${folderDropTarget === collection ? "drop-target " : ""}${folderHierarchyDropTarget === collection ? "hierarchy-drop-target " : ""}${draggingCollection === collection ? "folder-dragging " : ""}collection-button`}
+                  onPointerDown={(event) => beginFolderDrag(event, collection)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setPaperMenu(null);
+                    setFolderMenu({
+                      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 200)),
+                      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 150)),
+                      collection,
+                    });
+                  }}
+                  onClick={(event) => {
+                    if (event.ctrlKey) return;
+                    if (window.performance.now() < suppressFolderClickUntil.current) {
+                      suppressFolderClickUntil.current = 0;
+                      return;
+                    }
+                    setFolderFilter(collection);
+                  }}
+                >
                   <span>⌑</span><b>{name}</b><i>{count}</i>
                 </button>
               );
@@ -1888,9 +2155,11 @@ export default function App() {
               <button title="お気に入り" className={tagFilter === "__favorite" ? "active favorite" : "favorite"} onClick={() => setTagFilter(tagFilter === "__favorite" ? "" : "__favorite")}><span>★</span><b>({papers.filter((paper) => paper.isFavorite).length})</b></button>
               {(["blue", "yellow", "red"] as const).map((color) => <button key={color} title={`${color} flag`} className={tagFilter === `__flag_${color}` ? `active ${color}` : color} onClick={() => setTagFilter(tagFilter === `__flag_${color}` ? "" : `__flag_${color}`)}><span>⚑</span><b>({papers.filter((paper) => paper.flagColor === color).length})</b></button>)}
             </div>
-            {Array.from(new Set(papers.flatMap((paper) => paper.tags))).slice(0, 8).map((tag) => (
-              <button key={tag} className={tagFilter === tag ? "active" : ""} onClick={() => setTagFilter(tagFilter === tag ? "" : tag)}><span className="tag-dot" />#{tag.replace(/^#+/, "")}</button>
-            ))}
+            <div className="sidebar-tag-list" aria-label="タグ一覧">
+              {Array.from(new Set(papers.flatMap((paper) => paper.tags))).map((tag) => (
+                <button key={tag} className={tagFilter === tag ? "active" : ""} onClick={() => setTagFilter(tagFilter === tag ? "" : tag)}><span className="tag-dot" />#{tag.replace(/^#+/, "")}</button>
+              ))}
+            </div>
             <div className="folder-card">
               <span>保存場所</span>
               <strong>{root.split("/").filter(Boolean).at(-1) ?? "Rill"}</strong>
@@ -2052,14 +2321,24 @@ export default function App() {
           {dragPreview.count > 1 && <i>{dragPreview.count}</i>}
         </div>
       )}
+      {folderDragPreview && (
+        <div className={folderHierarchyDropTarget !== null ? "folder-drag-preview accepted" : "folder-drag-preview"} style={{ left: folderDragPreview.x, top: folderDragPreview.y }} aria-hidden="true">
+          <span>⌑</span>
+          <div>
+            <strong>{folderDragPreview.collection.split("/").at(-1)}</strong>
+            <small>{folderHierarchyDropTarget === null ? "移動先のフォルダへドロップ" : `→ ${folderHierarchyDropTarget || "Papers直下"}`}</small>
+          </div>
+        </div>
+      )}
       {folderMenu && (
-        <div className="folder-context-menu" style={{ left: folderMenu.x, top: folderMenu.y }} onClick={(event) => event.stopPropagation()}>
+        <div className="folder-context-menu" role="menu" style={{ left: folderMenu.x, top: folderMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <button type="button" onClick={() => openCreateFolder(folderMenu.collection)}>{folderMenu.collection ? "この中に新規フォルダ" : "新規フォルダ"}</button>
+          {folderMenu.collection && <button type="button" onClick={() => openRenameFolder(folderMenu.collection)}>名前を変更…</button>}
           {folderMenu.collection && <button className="danger" type="button" onClick={() => { setDeleteFolderTarget(folderMenu.collection); setFolderMenu(null); }}>フォルダを削除</button>}
         </div>
       )}
       {paperMenu && (
-        <div className="paper-context-menu" role="menu" style={{ left: paperMenu.x, top: paperMenu.y }} onClick={(event) => event.stopPropagation()}>
+        <div className="paper-context-menu" role="menu" style={{ left: paperMenu.x, top: paperMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <div className="context-menu-heading">{paperMenu.paperIds.length}件の文献</div>
           <div className="context-submenu-wrap">
             <button type="button" aria-haspopup="menu"><span>移動する</span><b>›</b></button>
@@ -2087,6 +2366,17 @@ export default function App() {
             <p>{folderDialog.parent ? `「${folderDialog.parent}」の中に作成します` : "Papersの中に作成します"}{folderDialog.movePaperIds?.length ? `。作成後、選択した${folderDialog.movePaperIds.length}件を移動します。` : ""}</p>
             <input autoFocus value={folderDialog.name} onChange={(event) => setFolderDialog({ ...folderDialog, name: event.target.value })} placeholder="例：うつ病" />
             <div><button type="button" onClick={() => setFolderDialog(null)}>キャンセル</button><button className="confirm" type="button" disabled={!folderDialog.name.trim()} onClick={() => void createLibraryFolder(folderDialog.parent, folderDialog.name, folderDialog.movePaperIds)}>{folderDialog.movePaperIds?.length ? "作成して移動" : "作成"}</button></div>
+          </form>
+        </div>
+      )}
+      {renameFolderDialog && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setRenameFolderDialog(null)}>
+          <form className="folder-dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void renameLibraryFolder(renameFolderDialog.collection, renameFolderDialog.name); }}>
+            <span className="dialog-icon">⌑</span>
+            <h2>フォルダ名を変更</h2>
+            <p>「{renameFolderDialog.collection}」の名前を変更します。中の論文と子フォルダはそのまま移動します。</p>
+            <input autoFocus value={renameFolderDialog.name} onChange={(event) => setRenameFolderDialog({ ...renameFolderDialog, name: event.target.value })} placeholder="フォルダ名" />
+            <div><button type="button" onClick={() => setRenameFolderDialog(null)}>キャンセル</button><button className="confirm" type="submit" disabled={!renameFolderDialog.name.trim() || busy}>変更</button></div>
           </form>
         </div>
       )}

@@ -58964,6 +58964,22 @@ window.createRillPdfEngine = options => {
       });
     }
   };
+  let onKeyDown = event => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    let key = event.key.toLowerCase();
+    if (key === 'c') {
+      event.preventDefault();
+      emit('shortcut', {
+        command: 'copy-selection'
+      });
+    } else if (key === 'f') {
+      event.preventDefault();
+      emit('shortcut', {
+        command: 'focus-search'
+      });
+    }
+  };
+  document.addEventListener('keydown', onKeyDown, true);
   let view = new common_view({
     ...options,
     platform: 'web',
@@ -59034,6 +59050,7 @@ window.createRillPdfEngine = options => {
       return () => listeners.delete(listener);
     },
     destroy: () => {
+      document.removeEventListener('keydown', onKeyDown, true);
       listeners.clear();
       view.destroy();
       view = null;

@@ -1,6 +1,6 @@
 # Rill macOS distribution
 
-Rill 1.0.0 is the current Apple silicon release and is bundled as `Rill.app` and a DMG.
+Rill 1.0.3 is the current Apple silicon release candidate and is bundled as `Rill.app` and a DMG.
 
 ## Reproducible local build
 
@@ -12,7 +12,7 @@ npm run desktop:build
 Expected artifacts:
 
 - `src-tauri/target/release/bundle/macos/Rill.app`
-- `src-tauri/target/release/bundle/dmg/Rill_1.0.0_aarch64.dmg`
+- `src-tauri/target/release/bundle/dmg/Rill_1.0.3_aarch64.dmg`
 
 The default development configuration uses ad hoc signing
 (`signingIdentity: "-"`). Public artifacts must instead be built with the
@@ -42,7 +42,11 @@ Before public distribution without Gatekeeper warnings:
    runtime settings through the Tauri release configuration.
 3. Build the app and DMG, then submit the DMG with `xcrun notarytool`.
 4. Staple the accepted ticket with `xcrun stapler staple`.
-5. Repeat `codesign`, `spctl`, and checksum validation on the final artifact.
+5. Generate `Rill_1.0.3_SHA256SUMS.txt` beside the notarized DMG and repeat
+   `codesign`, `spctl`, and checksum validation on the final artifact.
+
+The checksum file is a release artifact created by `npm run release:macos`.
+The ordinary `npm run desktop:build` development build does not create it.
 
 Do not commit Apple credentials, signing certificates, keychain exports, or
 notarization profiles to this repository.

@@ -4,11 +4,33 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RILL_VERSION="$(cd "$PROJECT_ROOT" && node -p "require('./package.json').version")"
 DMG_PATH="${1:-$PROJECT_ROOT/src-tauri/target/release/bundle/dmg/Rill_${RILL_VERSION}_aarch64.dmg}"
+DMG_FILENAME="$(basename "$DMG_PATH")"
+CHECKSUM_FILENAME="Rill_${RILL_VERSION}_SHA256SUMS.txt"
+CHECKSUM_PATH="$(dirname "$DMG_PATH")/$CHECKSUM_FILENAME"
 
 if [[ ! -f "$DMG_PATH" ]]; then
-  echo "検査するDMGが見つかりません: $DMG_PATH" >&2
+  echo "The DMG to verify was not found: $DMG_PATH" >&2
   exit 2
 fi
+
+if [[ ! -f "$CHECKSUM_PATH" ]]; then
+  echo "The SHA-256 checksum file was not found: $CHECKSUM_PATH" >&2
+  exit 5
+fi
+
+echo "== SHA-256 =="
+CHECKSUM_LINES="$(wc -l < "$CHECKSUM_PATH" | tr -d '[:space:]')"
+CHECKSUM_LINE="$(cat "$CHECKSUM_PATH")"
+CHECKSUM_HASH="${CHECKSUM_LINE%%  *}"
+CHECKSUM_TARGET="${CHECKSUM_LINE#*  }"
+if [[ "$CHECKSUM_LINES" != "1" || ! "$CHECKSUM_HASH" =~ ^[0-9a-fA-F]{64}$ || "$CHECKSUM_TARGET" != "$DMG_FILENAME" ]]; then
+  echo "The SHA-256 file has an invalid format or target filename: $CHECKSUM_PATH" >&2
+  exit 6
+fi
+(
+  cd "$(dirname "$DMG_PATH")"
+  shasum -a 256 -c "$CHECKSUM_FILENAME"
+)
 
 CHECK_STAGE="$(mktemp -d /private/tmp/rill-release-check.XXXXXX)"
 CHECK_DMG="$CHECK_STAGE/Rill.dmg"
@@ -37,7 +59,7 @@ MOUNTED=1
 APP_PATH="$MOUNT_POINT/Rill.app"
 
 if [[ ! -d "$APP_PATH" ]]; then
-  echo "DMG内にRill.appがありません" >&2
+  echo "Rill.app was not found in the DMG." >&2
   exit 3
 fi
 
@@ -46,7 +68,7 @@ APP_SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP_PATH/C
 APP_BUILD_VERSION="$(plutil -extract CFBundleVersion raw "$APP_PATH/Contents/Info.plist")"
 printf '%s\n%s\n' "$APP_SHORT_VERSION" "$APP_BUILD_VERSION"
 if [[ "$APP_SHORT_VERSION" != "$RILL_VERSION" || "$APP_BUILD_VERSION" != "$RILL_VERSION" ]]; then
-  echo "DMG内アプリのバージョンがpackage.jsonと一致しません" >&2
+  echo "The app version in the DMG does not match package.json." >&2
   exit 4
 fi
 
@@ -61,4 +83,4 @@ if [[ -f "$HELPER_PATH" ]]; then
   codesign --verify --strict --verbose=2 "$HELPER_PATH"
 fi
 
-echo "配布検査に合格しました: $DMG_PATH"
+echo "The distributable DMG passed verification: $DMG_PATH"

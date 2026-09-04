@@ -1,9 +1,8 @@
 # Rill
 
-Rill is a local-first macOS application for organizing, reading, and citing
-medical papers. PDFs remain in a folder you choose, while bibliographic
-metadata, reading notes, annotations, and Obsidian-compatible Markdown stay
-alongside your library.
+Rill is a local-first macOS application for managing medical papers. PDFs remain
+in a user-selected local folder, while bibliographic metadata, reading notes,
+annotations, and Obsidian-compatible Markdown stay alongside the library.
 
 ## Download
 
@@ -15,7 +14,25 @@ Apple.
 
 [View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
 
-## Current release
+## Upcoming maintenance release
+
+Version `1.0.3` is being prepared and includes everything in the first public
+release, plus:
+
+- folder renaming from the Library context menu
+- drag-and-drop folder reparenting
+- direct copying of selected PDF text without creating an annotation
+- responsive startup and PDF import for cloud-backed local folders
+- conservative DOI matching that validates Crossref candidates by title, author, year, and journal
+- safer handling for oversized, malformed, and same-named PDFs
+- stronger library-boundary checks for synchronized folders
+- lower reader memory use and lazy thumbnail rendering
+- reliable retry and rollback when local saves fail
+
+The download above remains version `1.0.0` until `1.0.3` has passed the complete
+Developer ID signing and Apple notarization process.
+
+## Current signed release
 
 Version `1.0.0` is the first stable public release and includes:
 
@@ -54,9 +71,8 @@ order. When extracted lines and selection rectangles form a high-confidence
 two-column layout, `rillReadingOrderV2` applies a conservative left-column then
 right-column order.
 
-Rill 1.0.0 is distributed free of charge with corresponding source code under
-the GNU AGPLv3. Voluntary donations do not limit the freedoms granted by the
-license.
+Rill is distributed free of charge with corresponding source code under the
+GNU AGPLv3. Voluntary donations do not limit the freedoms granted by the license.
 
 ## Privacy
 
@@ -64,7 +80,13 @@ Rill library data is not stored in this repository. PDF files, `.rill` metadata,
 Obsidian configuration, exported reference files, and local databases are
 explicitly excluded by `.gitignore`.
 
-Do not commit copyrighted papers, patient information, private reading notes,
+Rill's core library and reading workflow are local-first. When the user
+explicitly requests bibliographic lookup, the available title, DOI, author,
+year, or journal query is sent to Crossref or PubMed to find a match. The PDF
+and Reading Notes are not uploaded for that lookup. Translation uses Apple's
+system Translation framework and may require macOS to download language data.
+
+Do not commit copyrighted papers, patient information, personal reading notes,
 API credentials, or an Obsidian Vault to this repository.
 
 ## Development
@@ -76,7 +98,7 @@ Requirements:
 - Rust and the Tauri prerequisites
 
 ```bash
-npm install
+npm ci
 npm run desktop:frontend:build
 npm run desktop:build
 ```
@@ -87,8 +109,17 @@ Run the desktop application in development with:
 npm run desktop:dev
 ```
 
-The Tauri backend is in `src-tauri/`, and the React desktop interface is in
-`desktop/`. The earlier web prototype remains in `app/` for reference.
+The Tauri backend is under `src-tauri/`; the React desktop interface is under
+`desktop/`. The earlier web prototype remains under `app/` for reference.
 
 Release numbering and the manifests that must stay aligned are documented in
 [`docs/VERSIONING.md`](docs/VERSIONING.md).
+
+Release changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
+Planned reliability and portability work is tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+Security issues should be reported privately as described in
+[`SECURITY.md`](SECURITY.md). Instructions for restoring the development
+environment on another Mac are in
+[`docs/HANDOFF_TO_ANOTHER_MAC.md`](docs/HANDOFF_TO_ANOTHER_MAC.md).

@@ -201,10 +201,10 @@ index 2973701..3fb2e4f 100644
  ];
 diff --git a/src/index.rill.js b/src/index.rill.js
 new file mode 100644
-index 0000000..f7c71c5
+index 0000000..bfa1e2f
 --- /dev/null
 +++ b/src/index.rill.js
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,78 @@
 +import View from './common/view';
 +
 +// UI-free bridge used by Rill. The upstream View renders PDF pages and text
@@ -217,6 +217,19 @@ index 0000000..f7c71c5
 +			listener({ type, ...payload });
 +		}
 +	};
++	let onKeyDown = (event) => {
++		if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
++		let key = event.key.toLowerCase();
++		if (key === 'c') {
++			event.preventDefault();
++			emit('shortcut', { command: 'copy-selection' });
++		}
++		else if (key === 'f') {
++			event.preventDefault();
++			emit('shortcut', { command: 'focus-search' });
++		}
++	};
++	document.addEventListener('keydown', onKeyDown, true);
 +	let view = new View({
 +		...options,
 +		platform: 'web',
@@ -263,6 +276,7 @@ index 0000000..f7c71c5
 +			return () => listeners.delete(listener);
 +		},
 +		destroy: () => {
++			document.removeEventListener('keydown', onKeyDown, true);
 +			listeners.clear();
 +			view.destroy();
 +			view = null;

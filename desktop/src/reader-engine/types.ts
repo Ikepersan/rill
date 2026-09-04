@@ -1,4 +1,17 @@
-import type { PdfAnnotation } from "../PdfReader";
+export type AnnotationColor = "yellow" | "red" | "green" | "blue" | "purple";
+export type AnnotationKind = "highlight" | "underline" | "strikeout" | "area";
+
+export type PdfAnnotation = {
+  id: string;
+  page: number;
+  text: string;
+  color: AnnotationColor;
+  kind: AnnotationKind;
+  imageDataUrl?: string;
+  comment: string;
+  rects: Array<{ page?: number | null; x: number; y: number; width: number; height: number }>;
+  createdAt: string;
+};
 
 export type PageTarget = { pageIndex: number };
 export type AnnotationTarget = { annotationID: string };
@@ -15,6 +28,7 @@ export type ReaderEvent =
   | { type: "view-state-changed"; pageIndex?: number; scale?: number | string }
   | { type: "view-stats-changed"; pagesCount: number; pageIndex: number }
   | { type: "search-changed"; state: SearchState | null }
+  | { type: "shortcut"; command: "copy-selection" | "focus-search" }
   | { type: "link-opened"; url: string }
   | { type: "error"; message: string };
 

@@ -24,7 +24,7 @@ test("React reader uses only the public Rill engine boundary and five Rill color
     read("desktop/src/RillPdfReader.tsx"),
     read("desktop/src/App.tsx"),
   ]);
-  assert.match(app, /import \{ RillPdfReader \}/);
+  assert.match(app, /lazy\(\(\) => import\("\.\/RillPdfReader"\)/);
   assert.doesNotMatch(app, /ZoteroPdfReader/);
   assert.doesNotMatch(reader, /_primaryView|\._render\(|createReader|zotero-reader/i);
   for (const color of ["yellow", "red", "green", "blue", "purple"]) {
@@ -33,6 +33,189 @@ test("React reader uses only the public Rill engine boundary and five Rill color
   for (const kind of ["highlight", "underline", "strikeout"]) {
     assert.match(reader, new RegExp(`"${kind}"`));
   }
+});
+
+test("PDF work is bounded and avoids byte-array memory amplification", async () => {
+  const [reader, adapter, bundle] = await Promise.all([
+    read("desktop/src/RillPdfReader.tsx"),
+    read("desktop/src/reader-engine/IframeRillPdfEngine.ts"),
+    read("desktop/public/rill-pdf-engine/view.js"),
+  ]);
+  assert.match(reader, /MAX_READER_PAGES/);
+  assert.match(reader, /MAX_CAPTURE_PIXELS/);
+  assert.match(reader, /IntersectionObserver/);
+  assert.match(adapter, /new frameWindow\.Uint8Array\(pdf\)/);
+  assert.doesNotMatch(adapter, /Array\.from\(new Uint8Array\(pdf\)\)/);
+  assert.match(reader, /enableScripting:\s*false/);
+  assert.match(reader, /isEvalSupported:\s*false/);
+  assert.match(reader, /\["http:", "https:", "mailto:"\]\.includes\(target\.protocol\)/);
+  assert.match(reader, /noopener,noreferrer/);
+  assert.match(bundle, /PDFViewerApplicationOptions\.set\('enableScripting', false\)/);
+  assert.match(bundle, /PDFViewerApplicationOptions\.set\('isEvalSupported', false\)/);
+});
+
+test("persisted PDF annotation geometry is rejected before engine conversion", async () => {
+  const [source, adapter] = await Promise.all([
+    read("desktop/src/reader-engine/sanitizeAnnotationGeometry.ts"),
+    read("desktop/src/reader-engine/IframeRillPdfEngine.ts"),
+  ]);
+  const javascript = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const loadedModule = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+  const sanitize = loadedModule.sanitizePersistedAnnotationGeometry;
+
+  const firstPageRect = { page: 1, x: 0.1, y: 0.2, width: 0.3, height: 0.04 };
+  const nextPageRect = { page: 2, x: 0.2, y: 0.1, width: 0.4, height: 0.05 };
+  assert.deepEqual(sanitize({ page: 1, rects: [nextPageRect, firstPageRect] }, 2), {
+    page: 1,
+    rects: [firstPageRect],
+    nextPageRects: [nextPageRect],
+  });
+  assert.deepEqual(sanitize({ page: 2, rects: [{ ...firstPageRect, page: null }] }, 2), {
+    page: 2,
+    rects: [{ ...firstPageRect, page: 2 }],
+  });
+  const clamped = sanitize({
+    page: 1,
+    rects: [{ page: 1, x: -5e-7, y: 0.9, width: 0.2, height: 0.1000005 }],
+  }, 1);
+  assert.equal(clamped.page, 1);
+  assert.equal(clamped.rects[0].x, 0);
+  assert.equal(clamped.rects[0].y, 0.9);
+  assert.ok(Math.abs(clamped.rects[0].width - 0.1999995) < 1e-12);
+  assert.ok(Math.abs(clamped.rects[0].height - 0.1) < 1e-12);
+  const exactBoundary = sanitize({
+    page: 1,
+    rects: [
+      { page: 1, x: 0.8, y: 0.1, width: 0.200001, height: 0.1 },
+      { page: 1, x: 0.1, y: 0.9, width: 0.1, height: 0.100001 },
+    ],
+  }, 1);
+  assert.equal(exactBoundary.rects.length, 2);
+  assert.ok(exactBoundary.rects.every((rect) => rect.x >= 0 && rect.y >= 0));
+  assert.ok(exactBoundary.rects.every((rect) => rect.x + rect.width <= 1 && rect.y + rect.height <= 1));
+  assert.equal(loadedModule.sanitizePersistedAnnotationColor("orange"), "yellow");
+  assert.equal(loadedModule.sanitizePersistedAnnotationKind("note"), "highlight");
+
+  const malformed = [
+    { page: 0, rects: [firstPageRect] },
+    { page: 1, rects: [] },
+    { page: 1, rects: [{ ...firstPageRect, page: 1.5 }] },
+    { page: 1, rects: [{ ...firstPageRect, x: Number.NaN }] },
+    { page: 1, rects: [{ ...firstPageRect, y: Number.POSITIVE_INFINITY }] },
+    { page: 1, rects: [{ ...firstPageRect, x: -0.01 }] },
+    { page: 1, rects: [{ ...firstPageRect, width: 0 }] },
+    { page: 1, rects: [{ ...firstPageRect, height: -0.01 }] },
+    { page: 1, rects: [{ ...firstPageRect, x: 0.8, width: 0.3 }] },
+    { page: 1, rects: [{ ...firstPageRect, y: 0.98, height: 0.04 }] },
+    { page: 1, rects: [{ ...firstPageRect, x: -2e-6 }] },
+    { page: 1, rects: [{ ...firstPageRect, y: 0.9, height: 0.100002 }] },
+    { page: 1, rects: [firstPageRect, { ...nextPageRect, page: 3 }] },
+    { page: 1, rects: [firstPageRect, nextPageRect, { ...firstPageRect, page: 3 }] },
+    { page: 1, rects: [firstPageRect, { ...nextPageRect, width: 0 }] },
+  ];
+  for (const annotation of malformed) {
+    assert.equal(sanitize(annotation, 3), null);
+  }
+  assert.equal(sanitize({ page: 3, rects: [firstPageRect] }, 2), null);
+  assert.equal(sanitize({ page: 2, rects: [{ ...nextPageRect, page: 3 }] }, 2), null);
+  assert.equal(sanitize({ page: 1, rects: [firstPageRect] }, 0), null);
+
+  assert.match(adapter, /sanitizePersistedAnnotationGeometry\(annotation, this\.boxes\.length\)/);
+  assert.match(adapter, /sanitizePersistedAnnotationGeometry\(converted, this\.boxes\.length\)/);
+  assert.match(adapter, /filter\(isEngineAnnotation\)/);
+  assert.match(adapter, /position\.rects\.every\(isEngineRect\)/);
+  assert.match(adapter, /isUsablePageBox\(nextPageBox\)/);
+});
+
+test("selected PDF text can be copied without creating an annotation", async () => {
+  const [readerSource, copySource, adapterSource, typeSource, bundle] = await Promise.all([
+    read("desktop/src/RillPdfReader.tsx"),
+    read("desktop/src/reader-engine/copyText.ts"),
+    read("desktop/src/reader-engine/IframeRillPdfEngine.ts"),
+    read("desktop/src/reader-engine/types.ts"),
+    read("desktop/public/rill-pdf-engine/view.js"),
+  ]);
+  assert.match(readerSource, /copyPlainText\(selection\.annotation\.text\)/);
+  assert.match(readerSource, /copy-selection[\s\S]*コピー<\/button>/);
+  assert.match(readerSource, /選択した文章をコピーしました/);
+  assert.doesNotMatch(
+    readerSource.match(/async function copyPendingSelection\(\)[\s\S]*?\n  \}/)?.[0] ?? "",
+    /repositoryRef\.current\?\.update/,
+  );
+  assert.match(copySource, /writer\.writeText\(text\)/);
+  assert.match(copySource, /document\.execCommand\("copy"\)/);
+  assert.match(typeSource, /type: "shortcut"; command: "copy-selection" \| "focus-search"/);
+  assert.match(adapterSource, /event\.type === "shortcut"/);
+  assert.match(bundle, /event\.metaKey \|\| event\.ctrlKey/);
+  assert.match(bundle, /command: 'copy-selection'/);
+  assert.match(bundle, /command: 'focus-search'/);
+  assert.match(bundle, /removeEventListener\('keydown', onKeyDown, true\)/);
+  assert.match(readerSource, /addEventListener\("rill:\/\/copy-request", handleCopyRequest\)/);
+  assert.match(readerSource, /handleCopyRequest[\s\S]*event\.preventDefault\(\)[\s\S]*copyPendingSelection\(\)/);
+});
+
+test("Library exposes every tag in an independently scrollable list", async () => {
+  const [app, css] = await Promise.all([
+    read("desktop/src/App.tsx"),
+    read("desktop/src/styles.css"),
+  ]);
+  const tagList = app.match(/<div className="sidebar-tag-list"[\s\S]*?<\/div>/)?.[0] ?? "";
+  assert.match(tagList, /papers\.flatMap\(\(paper\) => paper\.tags\)/);
+  assert.doesNotMatch(tagList, /\.slice\(/);
+  assert.match(css, /\.sidebar-tag-list\s*\{[\s\S]*overflow-y:\s*auto/);
+  assert.match(css, /scrollbar-gutter:\s*stable/);
+});
+
+test("PDF text copying handles clipboard and fallback failures without leaking DOM elements", async () => {
+  const source = await read("desktop/src/reader-engine/copyText.ts");
+  const javascript = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const copyModule = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+
+  const writes = [];
+  assert.equal(await copyModule.copyPlainText("selected", {
+    writeText: async (text) => { writes.push(text); },
+  }), true);
+  assert.deepEqual(writes, ["selected"]);
+
+  let removed = 0;
+  const textarea = {
+    value: "",
+    style: {},
+    setAttribute() {},
+    select() {},
+    remove() { removed += 1; },
+  };
+  const fallbackDocument = {
+    createElement: () => textarea,
+    body: { appendChild() {} },
+    execCommand: () => true,
+  };
+  assert.equal(await copyModule.copyPlainText(
+    "fallback",
+    { writeText: async () => { throw new Error("denied"); } },
+    fallbackDocument,
+  ), true);
+  assert.equal(textarea.value, "fallback");
+  assert.equal(removed, 1);
+
+  const throwingDocument = {
+    ...fallbackDocument,
+    execCommand: () => { throw new Error("blocked"); },
+  };
+  assert.equal(await copyModule.copyPlainText(
+    "blocked",
+    { writeText: async () => { throw new Error("denied"); } },
+    throwingDocument,
+  ), false);
+  assert.equal(removed, 2);
+
+  assert.equal(await copyModule.copyPlainText("", {
+    writeText: async () => { throw new Error("should not write"); },
+  }), false);
 });
 
 test("AnnotationRepository updates optimistically and rolls back a failed save", async () => {
@@ -119,15 +302,31 @@ test("reader lifecycle stays mounted and dismisses the Rill popup explicitly", a
   assert.match(reader, /event\.type === "backdrop-tapped"/);
   assert.match(reader, /closest\("\.selection-menu"\)/);
   assert.match(reader, /performance\.now\(\) - menuPointerDownAtRef\.current < 500/);
-  assert.match(reader, /nextPendingSelection\(current, \{ type: "cancel" \}\)[\s\S]*350/);
+  assert.match(reader, /setTimeout\(\(\) => \{[\s\S]*updatePendingSelection\(null\)[\s\S]*\}, 350\)/);
   assert.doesNotMatch(adapter, /finalizeSelection|selectionchange/);
   assert.doesNotMatch(bundle, /finalizeSelection: \(\) => view\.finalizeSelection\(\)/);
 });
 
-test("the current macOS release is Rill 1.0.0", async () => {
+test("Back and Escape wait for annotation persistence before leaving the reader", async () => {
+  const reader = await read("desktop/src/RillPdfReader.tsx");
+
+  assert.match(
+    reader,
+    /const closeReader = useCallback\(async \(\) => \{[\s\S]*?await repositoryRef\.current\?\.flush\(\)[\s\S]*?onCloseRef\.current\(\)/,
+  );
+  assert.match(reader, /event\.key !== "Escape"[\s\S]*?void closeReader\(\)/);
+  assert.match(reader, /className="reader-back" onClick=\{\(\) => \{ void closeReader\(\); \}\}/);
+  assert.match(
+    reader,
+    /const finalFlush = repository\?\.flush\(\) \?\? Promise\.resolve\(\);\s+onRegisterFlushRef\.current\?\.\(\(\) => finalFlush\)/,
+  );
+  assert.doesNotMatch(reader, /if \(repository\) void repository\.flush\(\);\s+onRegisterFlush\?\.\(null\)/);
+});
+
+test("the current macOS release is Rill 1.0.3", async () => {
   const config = JSON.parse(await read("src-tauri/tauri.conf.json"));
   assert.equal(config.productName, "Rill");
-  assert.equal(config.version, "1.0.0");
+  assert.equal(config.version, "1.0.3");
   assert.equal(config.identifier, "app.rill.library");
 });
 
@@ -144,10 +343,12 @@ test("bundled engine records source, patch, licenses and fixed commits", async (
   ]);
   const commit = "c12c65e3f01414ae244f6102da4028c700cf6584";
   const pdfjsCommit = "f57fc80d1c07e4cdc50a767ae0b500b5272123b4";
-  assert.match(license, /AGPL-3\.0-only/);
-  assert.match(releaseNotice, /Rill 1\.0\.0/);
-  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v1\.0\.0/);
-  assert.match(notice, /Rill 1\.0\.0/);
+  assert.match(license, /^\s*GNU AFFERO GENERAL PUBLIC LICENSE/);
+  assert.match(license, /Version 3, 19 November 2007/);
+  assert.doesNotMatch(license, /pdf-reader is copyright|Zotero name is a registered trademark/);
+  assert.match(releaseNotice, /Rill 1\.0\.3/);
+  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v1\.0\.3/);
+  assert.match(notice, /Rill 1\.0\.3/);
   assert.doesNotMatch(notice, /Rill 0\.7\.11/);
   assert.match(notice, /modified for Rill on 2026-07-19/);
   assert.match(notice, new RegExp(commit));
