@@ -6,7 +6,7 @@ copying local build products or personal library data.
 ## Source of truth
 
 - Public repository: `https://github.com/Ikepersan/rill.git`
-- Current release candidate: `1.0.3`
+- Current public release: `1.0.3`
 - Published release tags are immutable. Continue work from the current branch or
   create a new `codex/` branch from the latest public `main` revision.
 - Clone submodules recursively. The PDF engine is pinned to audited revisions.

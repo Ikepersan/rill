@@ -1,6 +1,6 @@
 # Rill macOS distribution
 
-Rill 1.0.3 is the current Apple silicon release candidate and is bundled as `Rill.app` and a DMG.
+Rill 1.0.3 is the current public Apple silicon release and is bundled as `Rill.app` and a DMG.
 
 ## Reproducible local build
 
