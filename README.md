@@ -6,18 +6,17 @@ annotations, and Obsidian-compatible Markdown stay alongside the library.
 
 ## Download
 
-**[Download Rill 1.0.0 for Apple silicon (DMG)](https://github.com/Ikepersan/rill/releases/download/v1.0.0/Rill_1.0.0_aarch64.dmg)**
+**[Download Rill 1.0.3 for Apple silicon (DMG)](https://github.com/Ikepersan/rill/releases/download/v1.0.3/Rill_1.0.3_aarch64.dmg)**
 
 Open the downloaded DMG and drag `Rill.app` into `Applications`.
 The distribution is signed with a Developer ID certificate and notarized by
 Apple.
 
-[View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
+[View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.3)
 
-## Upcoming maintenance release
+## Current release
 
-Version `1.0.3` is being prepared and includes everything in the first public
-release, plus:
+Version `1.0.3` includes everything in the first public release, plus:
 
 - folder renaming from the Library context menu
 - drag-and-drop folder reparenting
@@ -29,12 +28,9 @@ release, plus:
 - lower reader memory use and lazy thumbnail rendering
 - reliable retry and rollback when local saves fail
 
-The download above remains version `1.0.0` until `1.0.3` has passed the complete
-Developer ID signing and Apple notarization process.
+## Core features
 
-## Current signed release
-
-Version `1.0.0` is the first stable public release and includes:
+Rill also includes:
 
 - a native macOS menu bar with Settings, library actions, view shortcuts, and version Help
 - a calmer Overview with refined typography, quieter empty states, and user-facing storage labels
