@@ -447,6 +447,8 @@ export default function App() {
   const collectionMutationInFlight = useRef(false);
   const suppressRowClick = useRef(false);
   const suppressFolderClickUntil = useRef(0);
+  const libraryLoadInFlight = useRef<{ root: string; operation: Promise<boolean> } | null>(null);
+  const libraryRefreshTimer = useRef(0);
 
   const selected = papers.find((paper) => paper.id === selectedId) ?? null;
   const readerPaper = papers.find((paper) => paper.id === readerPaperId) ?? null;
@@ -645,13 +647,26 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri || !root || view === "reader") return;
-    const refresh = () => {
-      if (!draftDirty.current && failedDraftSaves.current.size === 0 && document.visibilityState === "visible") {
-        void loadLibrary(root, false);
-      }
+    const cancelRefresh = () => {
+      window.clearTimeout(libraryRefreshTimer.current);
+      libraryRefreshTimer.current = 0;
     };
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
+    const scheduleRefresh = () => {
+      cancelRefresh();
+      libraryRefreshTimer.current = window.setTimeout(() => {
+        libraryRefreshTimer.current = 0;
+        if (!draftDirty.current && failedDraftSaves.current.size === 0 && document.visibilityState === "visible") {
+          void loadLibrary(root, false, false);
+        }
+      }, 700);
+    };
+    window.addEventListener("focus", scheduleRefresh);
+    window.addEventListener("blur", cancelRefresh);
+    return () => {
+      cancelRefresh();
+      window.removeEventListener("focus", scheduleRefresh);
+      window.removeEventListener("blur", cancelRefresh);
+    };
   }, [root, view]);
 
   useEffect(() => {
@@ -830,31 +845,58 @@ export default function App() {
     [papers],
   );
 
-  async function loadLibrary(libraryRoot = root, notify = true) {
+  async function loadLibrary(libraryRoot = root, notify = true, foreground = true): Promise<boolean> {
     if (!isTauri || !libraryRoot) return false;
-    setBusy(true);
+    if (foreground) {
+      window.clearTimeout(libraryRefreshTimer.current);
+      libraryRefreshTimer.current = 0;
+    }
+    const activeLoad = libraryLoadInFlight.current;
+    if (activeLoad) {
+      if (activeLoad.root !== libraryRoot) {
+        if (foreground) setBusy(true);
+        await activeLoad.operation;
+        return loadLibrary(libraryRoot, notify, foreground);
+      }
+      if (!foreground) return activeLoad.operation;
+      setBusy(true);
+      try {
+        return await activeLoad.operation;
+      } finally {
+        setBusy(false);
+      }
+    }
+    if (foreground) setBusy(true);
+    const operation = (async () => {
+      try {
+        await invoke("initialize_library", { root: libraryRoot });
+        const [loaded, loadedCollections, vaultConnected, loadedTrash] = await Promise.all([
+          invoke<Paper[]>("scan_library", { root: libraryRoot }),
+          invoke<string[]>("list_collections", { root: libraryRoot }),
+          invoke<boolean>("obsidian_vault_status", { root: libraryRoot }),
+          invoke<TrashEntry[]>("list_trashed_papers", { root: libraryRoot }),
+        ]);
+        setPapers(loaded);
+        setCollections(loadedCollections);
+        setObsidianConnected(vaultConnected);
+        setTrashEntries(loadedTrash);
+        if (selectedId && !loaded.some((paper) => paper.id === selectedId)) setSelectedId(null);
+        setSelectedIds((current) => new Set(Array.from(current).filter((id) => loaded.some((paper) => paper.id === id))));
+        if (notify) setToast(`${loaded.length}件の文献を読み込みました`);
+        return true;
+      } catch (error) {
+        setToast(String(error));
+        return false;
+      } finally {
+        setReady(true);
+        if (foreground) setBusy(false);
+      }
+    })();
+    libraryLoadInFlight.current = { root: libraryRoot, operation };
     try {
-      await invoke("initialize_library", { root: libraryRoot });
-      const [loaded, loadedCollections, vaultConnected, loadedTrash] = await Promise.all([
-        invoke<Paper[]>("scan_library", { root: libraryRoot }),
-        invoke<string[]>("list_collections", { root: libraryRoot }),
-        invoke<boolean>("obsidian_vault_status", { root: libraryRoot }),
-        invoke<TrashEntry[]>("list_trashed_papers", { root: libraryRoot }),
-      ]);
-      setPapers(loaded);
-      setCollections(loadedCollections);
-      setObsidianConnected(vaultConnected);
-      setTrashEntries(loadedTrash);
-      if (selectedId && !loaded.some((paper) => paper.id === selectedId)) setSelectedId(null);
-      setSelectedIds((current) => new Set(Array.from(current).filter((id) => loaded.some((paper) => paper.id === id))));
-      if (notify) setToast(`${loaded.length}件の文献を読み込みました`);
-      return true;
-    } catch (error) {
-      setToast(String(error));
-      return false;
+      return await operation;
     } finally {
-      setReady(true);
-      setBusy(false);
+      if (libraryLoadInFlight.current?.operation === operation) libraryLoadInFlight.current = null;
     }
   }
 
@@ -2396,6 +2438,7 @@ export default function App() {
             <span className="dialog-icon obsidian-dialog-icon">◇</span>
             <h2>Obsidian Vaultを設定</h2>
             <p><strong>Vault（保管庫）</strong>は、ObsidianがMarkdownをまとめて管理するフォルダです。Rillの保存場所をそのままVaultにすると、Notesの文献ノートをObsidianから編集できます。</p>
+            <p><strong>この登録はMacごとに初回の1回だけ必要です。</strong>VaultをGoogle Driveなどで同期しても、Obsidianの登録情報は別のMacへ自動では移りません。</p>
             <ol><li>「Obsidianを起動」を押す</li><li>Obsidianで「保管庫を開く」→「フォルダを保管庫として開く」を選ぶ</li><li>下記のRill保存場所を選ぶ</li></ol>
             <code>{root}</code>
             <div className="obsidian-dialog-actions"><button type="button" onClick={() => void openLibraryFolder()}>Finderで場所を表示</button><button type="button" onClick={() => void openObsidianApp()}>Obsidianを起動</button><button className="confirm" type="button" onClick={() => void refreshObsidianStatus()}>接続を確認</button></div>

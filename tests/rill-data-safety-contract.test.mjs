@@ -21,6 +21,9 @@ test("draft saves are serialized, revision guarded, and flushed before window cl
   assert.match(app, /failedDraftSaves/);
   assert.match(app, /for \(const failed of retries\)/);
   assert.doesNotMatch(app, /setInterval\(refresh, 15_000\)/);
+  assert.match(app, /libraryLoadInFlight/);
+  assert.match(app, /window\.setTimeout\(\(\) => \{[\s\S]*?loadLibrary\(root, false, false\)[\s\S]*?\}, 700\)/);
+  assert.match(app, /window\.addEventListener\("blur", cancelRefresh\)/);
   assert.match(repository, /flush\(\)/);
 });
 
@@ -102,6 +105,9 @@ test("durable saves fsync temporary files and metadata enrichment preserves newe
   assert.match(backend, /fn unique_sibling_temporary_path/);
   assert.match(backend, /\.create_new\(true\)/);
   assert.match(backend, /file\.sync_all\(\)/);
+  assert.match(backend, /fn sync_parent_directory/);
+  assert.match(backend, /File::open\(parent\)[\s\S]*directory\.sync_all\(\)/);
+  assert.match(backend, /fs::rename\(&temporary, destination\)[\s\S]*sync_parent_directory\(destination, commit_message\)/);
   assert.match(backend, /write_synced_then_rename\(\s*&config,/s);
   assert.match(backend, /write_synced_then_rename\(\s*&note_path,/s);
   assert.match(backend, /write_synced_then_rename\(\s*&path,/s);
@@ -124,4 +130,21 @@ test("stable paper identities survive external PDF renames and Trash round trips
   assert.match(backend, /newer_index_version_is_not_overwritten/);
   assert.match(backend, /same_basename_pdfs_keep_separate_notes_and_identities/);
   assert.match(backend, /annotation_save_restores_json_when_markdown_commit_fails/);
+});
+
+test("Obsidian connection requires the Vault to be registered on this Mac", async () => {
+  const [backend, frontend] = await Promise.all([
+    read("src-tauri/src/library.rs"),
+    read("desktop/src/App.tsx"),
+  ]);
+
+  assert.match(backend, /Application Support[\s\S]*obsidian[\s\S]*obsidian\.json/);
+  assert.match(backend, /fn registered_obsidian_vault_from_json/);
+  assert.match(backend, /registered_paths\.contains\(&canonical\)/);
+  assert.doesNotMatch(
+    backend,
+    /pub fn obsidian_vault_status[\s\S]{0,180}root\.join\("\.obsidian"\)\.is_dir\(\)/,
+  );
+  assert.match(frontend, /この登録はMacごとに初回の1回だけ必要です/);
+  assert.match(frontend, /Obsidianの登録情報は別のMacへ自動では移りません/);
 });

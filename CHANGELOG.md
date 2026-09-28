@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Improved
+
+- Synced the containing directory after atomic local-library file replacements so
+  note, index, annotation, and configuration filenames survive power loss more
+  reliably.
+
+### Fixed
+
+- Avoided reporting an Obsidian Vault as connected after a Mac migration until
+  that Vault is registered with Obsidian on the current Mac.
+- Coalesced repeated macOS focus events into one non-blocking library refresh so
+  returning from Obsidian does not queue overlapping full-library scans.
+
 ## 1.0.3
 
 ### Fixed

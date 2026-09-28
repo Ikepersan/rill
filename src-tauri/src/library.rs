@@ -481,12 +481,29 @@ fn write_synced_then_rename(
             .map_err(|error| format!("{write_message}: {error}"))?;
         drop(file);
         reject_symlink(destination, "保存先ファイル")?;
-        fs::rename(&temporary, destination).map_err(|error| format!("{commit_message}: {error}"))
+        fs::rename(&temporary, destination)
+            .map_err(|error| format!("{commit_message}: {error}"))?;
+        sync_parent_directory(destination, commit_message)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(destination: &Path, commit_message: &str) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("{commit_message}: 保存先フォルダを確認できませんでした"))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("{commit_message}（保存先フォルダの同期）: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_destination: &Path, _commit_message: &str) -> Result<(), String> {
+    Ok(())
 }
 
 fn library_index_path(root: &Path) -> Result<PathBuf, String> {
@@ -3660,6 +3677,51 @@ fn percent_encode_uri_value(value: &str) -> String {
         .collect()
 }
 
+fn obsidian_vault_candidates(root: &Path) -> Vec<PathBuf> {
+    [root.to_path_buf(), root.join("Notes")]
+        .into_iter()
+        .filter(|candidate| candidate.join(".obsidian").is_dir())
+        .collect()
+}
+
+fn registered_obsidian_vault_from_json(root: &Path, registry: &[u8]) -> Option<PathBuf> {
+    let registry = serde_json::from_slice::<serde_json::Value>(registry).ok()?;
+    let vaults = registry.get("vaults")?.as_object()?;
+    let registered_paths = vaults
+        .values()
+        .filter_map(|vault| vault.get("path")?.as_str())
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect::<HashSet<_>>();
+
+    obsidian_vault_candidates(root)
+        .into_iter()
+        .find_map(|candidate| {
+            let canonical = fs::canonicalize(&candidate).ok()?;
+            registered_paths.contains(&canonical).then_some(candidate)
+        })
+}
+
+fn registered_obsidian_vault(root: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        let registry = fs::read(
+            home.join("Library")
+                .join("Application Support")
+                .join("obsidian")
+                .join("obsidian.json"),
+        )
+        .ok()?;
+        registered_obsidian_vault_from_json(root, &registry)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        None
+    }
+}
+
 #[tauri::command]
 pub fn open_library_folder(root: String) -> Result<(), String> {
     let root = root_path(&root)?;
@@ -3682,7 +3744,7 @@ pub fn open_pdf_in_preview(root: String, pdf_path: String) -> Result<(), String>
 #[tauri::command]
 pub fn obsidian_vault_status(root: String) -> Result<bool, String> {
     let root = root_path(&root)?;
-    Ok(root.join(".obsidian").is_dir() || root.join("Notes/.obsidian").is_dir())
+    Ok(registered_obsidian_vault(&root).is_some())
 }
 
 #[tauri::command]
@@ -3702,8 +3764,10 @@ pub fn open_note_in_obsidian(root: String, note_path: String) -> Result<(), Stri
     {
         return Err("Markdownノートが見つかりません".into());
     }
-    if !root.join(".obsidian").is_dir() && !root.join("Notes/.obsidian").is_dir() {
-        return Err("Rillの保存場所を先にObsidian Vaultとして開いてください".into());
+    if registered_obsidian_vault(&root).is_none() {
+        return Err(
+            "Obsidianの「保管庫を管理」からRillの保存場所をVaultとして開いてください".into(),
+        );
     }
     let uri = format!(
         "obsidian://open?path={}",
@@ -4629,12 +4693,25 @@ mod tests {
         fs::write(&source, b"%PDF-1.4\nRill test PDF\n").expect("テストPDFを作成");
 
         initialize_library(library.to_string_lossy().to_string()).expect("ライブラリを初期化");
-        assert!(
-            !obsidian_vault_status(library.to_string_lossy().to_string()).expect("Vault状態を確認")
-        );
+        fs::create_dir_all(test_dir.join("Other Vault")).expect("別のVaultを作成");
+        let registry = serde_json::to_vec(&serde_json::json!({
+            "vaults": {
+                "unrelated": { "path": test_dir.join("Other Vault") }
+            }
+        }))
+        .expect("Obsidian登録情報を作成");
+        assert!(registered_obsidian_vault_from_json(&library, &registry).is_none());
         fs::create_dir_all(library.join(".obsidian")).expect("Vault設定を作成");
-        assert!(
-            obsidian_vault_status(library.to_string_lossy().to_string()).expect("Vault接続を確認")
+        assert!(registered_obsidian_vault_from_json(&library, &registry).is_none());
+        let registry = serde_json::to_vec(&serde_json::json!({
+            "vaults": {
+                "rill": { "path": library }
+            }
+        }))
+        .expect("Rill Vault登録情報を作成");
+        assert_eq!(
+            registered_obsidian_vault_from_json(&library, &registry),
+            Some(library.clone())
         );
         assert_eq!(
             percent_encode_uri_value("/Rill Library/Notes/日本語.md"),

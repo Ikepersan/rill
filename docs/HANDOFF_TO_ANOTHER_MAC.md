@@ -63,6 +63,12 @@ Reading Notes, an Obsidian Vault, exported references, or the selected library
 location. Allow the chosen local or synchronized folder to finish downloading,
 then select that library root again in Rill.
 
+Obsidian's list of registered Vaults is local to each Mac. Even when the Vault
+folder and its `.obsidian` settings are synchronized, open that folder once with
+Obsidian's **Open folder as vault** action on every new Mac. Rill checks the
+current Mac's Obsidian registry and only reports the Vault as connected after
+that registration succeeds; no Mac-specific path is embedded in the DMG.
+
 Never commit copyrighted papers, patient information, personal notes, API
 credentials, Apple signing keys, certificates, or notarization credentials.
 
