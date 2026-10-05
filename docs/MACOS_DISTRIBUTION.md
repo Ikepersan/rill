@@ -1,6 +1,8 @@
 # Rill macOS distribution
 
-Rill 1.0.4 is the current Apple silicon source target and is bundled as `Rill.app` and a DMG. The signed public download remains 1.0.3 until 1.0.4 passes distribution checks.
+Rill 1.0.4 is the current Apple silicon source target and is bundled as
+`Rill.app` and a DMG. The signed public download remains 1.0.3 until 1.0.4 passes
+distribution checks.
 
 ## Reproducible local build
 

@@ -36,8 +36,7 @@ are complete. Local ad hoc builds are for testing only.
 
 ## Current signed release
 
-Version `1.0.3` includes everything in the first public
-release, plus:
+Version `1.0.3` includes everything in the first public release, plus:
 
 - folder renaming from the Library context menu
 - drag-and-drop folder reparenting

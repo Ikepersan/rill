@@ -6,7 +6,7 @@ targets the next maintenance release, `1.0.4`. Do not change download links to
 
 Published versions follow semantic versioning:
 
-- patch (`1.0.4`): compatible fixes and small refinements after 1.0
+- patch (`1.0.4`): compatible fixes and small refinements after 1.0.3
 - minor (`1.1.0`): compatible features
 - major (`2.0.0`): changes that require a migration or materially alter the library format
 
