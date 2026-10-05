@@ -132,19 +132,22 @@ test("stable paper identities survive external PDF renames and Trash round trips
   assert.match(backend, /annotation_save_restores_json_when_markdown_commit_fails/);
 });
 
-test("Obsidian connection requires the Vault to be registered on this Mac", async () => {
-  const [backend, frontend] = await Promise.all([
+test("Markdown remains local-first without Obsidian integration or startup checks", async () => {
+  const [backend, frontend, commands, reader] = await Promise.all([
     read("src-tauri/src/library.rs"),
     read("desktop/src/App.tsx"),
+    read("src-tauri/src/lib.rs"),
+    read("desktop/src/RillPdfReader.tsx"),
   ]);
 
-  assert.match(backend, /Application Support[\s\S]*obsidian[\s\S]*obsidian\.json/);
-  assert.match(backend, /fn registered_obsidian_vault_from_json/);
-  assert.match(backend, /registered_paths\.contains\(&canonical\)/);
-  assert.doesNotMatch(
-    backend,
-    /pub fn obsidian_vault_status[\s\S]{0,180}root\.join\("\.obsidian"\)\.is_dir\(\)/,
-  );
-  assert.match(frontend, /この登録はMacごとに初回の1回だけ必要です/);
-  assert.match(frontend, /Obsidianの登録情報は別のMacへ自動では移りません/);
+  assert.doesNotMatch(frontend, /obsidian|Obsidian|Vault|vault/);
+  assert.doesNotMatch(commands, /obsidian/);
+  assert.doesNotMatch(backend, /registered_obsidian_vault|obsidian_vault_status|open_note_in_obsidian|open_obsidian_app|obsidian:\/\//);
+  assert.match(frontend, /Markdown保存/);
+  assert.match(frontend, /メモとPDF注釈をこのファイルへ保存します/);
+  assert.match(backend, /merge_paper_changes\(&base, &paper, &current\)/);
+  assert.match(backend, /外部の編集とRillで同じ項目/);
+  assert.match(backend, /replace_markdown_section\(&markdown, "Highlights", &annotations_markdown\(annotations\)\)/);
+  assert.match(reader, /invoke\("save_pdf_annotations"/);
+  assert.match(frontend, /invoke<Paper>\("save_paper"/);
 });

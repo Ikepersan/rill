@@ -38273,6 +38273,15 @@ class PDFView {
   }
   _updateScrollVector() {}
   _handlePointerDown(event) {
+    // Keep Rill's text selection intact for secondary clicks. Control-click
+    // on macOS may arrive as a primary click before the contextmenu event.
+    if (this._options.onContextMenu && !this._textAnnotationFocused()
+      && event.target.closest('#viewerContainer')
+      && (event.button === 2 || event.button === 0 && event.ctrlKey && isMac())) {
+      event.preventDefault();
+      if (event.button === 0) this._handleContextMenu(event);
+      return;
+    }
     // Prevent double-click word highlight on triple-click
     if (this._creationTimeout) {
       clearTimeout(this._creationTimeout);
@@ -38793,6 +38802,17 @@ class PDFView {
     this.a11yRecordCurrentPage();
   }
   _handleContextMenu(event) {
+    if (this._options.onContextMenu && !this._textAnnotationFocused()
+      && event.target.closest('#viewerContainer')) {
+      event.preventDefault();
+      this._pointerDownTriggered = false;
+      this._pointerDownTap = null;
+      let br = this._iframe.getBoundingClientRect();
+      let annotation = this._isSelectionCollapsed() ? null
+        : this._getAnnotationFromSelectionRanges(this._selectionRanges, 'highlight');
+      this._options.onContextMenu({ x: br.x + event.clientX, y: br.y + event.clientY, annotation });
+      return;
+    }
     if (this._options.platform === 'web') {
       return;
     }
@@ -58597,6 +58617,7 @@ class View {
       onSelectAnnotations: this._options.onSelectAnnotations,
       onSetDataTransferAnnotations: nop,
       onFocus: nop,
+      onContextMenu: this._options.onContextMenu,
       onOpenAnnotationContextMenu: nop,
       onOpenViewContextMenu: nop,
       onSetOverlayPopup: nop,
@@ -59017,7 +59038,8 @@ window.createRillPdfEngine = options => {
     onChangeViewStats: stats => emit('view-stats-changed', {
       stats
     }),
-    onBackdropTap: () => emit('backdrop-tapped')
+    onBackdropTap: () => emit('backdrop-tapped'),
+    onContextMenu: params => emit('context-menu-requested', params)
   });
   return Object.freeze({
     navigate: target => view.navigate(target),

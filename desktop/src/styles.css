@@ -135,9 +135,8 @@ button { color: inherit; }
 .flow-destinations > div, .flow-destinations > button { border: 1px solid var(--line); border-radius: 11px; padding: 13px; display: grid; grid-template-columns: 29px 1fr; align-items: center; column-gap: 8px; background: transparent; text-align: left; }
 .flow-destinations > button { cursor: pointer; }
 .flow-destinations > button:hover { background: #f4f1eb; }
-.flow-destinations > button.connected { border-color: #bdcbbf; background: #f0f4ef; }
 .flow-destinations span { grid-row: 1 / 3; width: 29px; height: 29px; display: grid; place-items: center; border-radius: 8px; }
-.obsidian-glyph { color: #7250a4; background: #eee9f5; }
+.markdown-glyph { color: #5f8066; background: #e8ece6; font-size: 10px; font-weight: 600; }
 .flow-destinations strong { font-size: 11px; }
 .flow-destinations small { font-size: 8px; color: var(--muted); }
 .change-root { display: block; margin: 0 auto; border: 0; background: transparent; color: var(--muted); font-size: 10px; text-decoration: underline; cursor: pointer; }
@@ -412,8 +411,7 @@ button { color: inherit; }
 .note-path { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 15px; }
 .note-path span { display: block; color: #8d887f; font-size: 9px; margin-bottom: 6px; }
 .note-path code { display: block; padding: 9px; border-radius: 8px; background: #eeece6; color: #77736b; font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vault-status { display: block; margin-top: 8px; color: #9a7468; font-size: 8px; }
-.vault-status.connected { color: #5f8066; }
+.markdown-storage-note { display: block; margin-top: 8px; color: var(--muted); font-size: 8px; }
 .note-path button { width: 100%; margin-top: 8px; border: 1px solid #d7d1df; color: #654c88; background: #f0ebf5; padding: 9px; border-radius: 8px; font-size: 10px; cursor: pointer; }
 .inspector-actions { flex: 0 0 auto; padding: 12px 18px; border-top: 1px solid var(--line); display: flex; align-items: stretch; justify-content: space-between; gap: 20px; background: var(--paper); }
 .inspector-actions button { border-radius: 9px; padding: 10px 13px; font-size: 10px; cursor: pointer; }
@@ -520,6 +518,12 @@ button { color: inherit; }
 .annotation-empty { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #99958d; text-align: center; }
 .annotation-empty > span { color: #b4ab9d; font-size: 25px; }.annotation-empty strong { margin-top: 12px; color: #656159; font: 400 14px/1.3 Georgia, "YuMincho", serif; }.annotation-empty small { margin-top: 6px; font-size: 8px; }
 .selection-menu { position: fixed; z-index: 260; padding: 7px; border: 1px solid #c9c4ba; border-radius: 11px; background: rgba(251,250,247,.98); box-shadow: 0 12px 28px rgba(45,42,37,.2); }
+.reader-context-menu { width: 228px; }
+.reader-context-menu button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 32px; padding: 6px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font-size: 12px; text-align: left; cursor: pointer; }
+.reader-context-menu button:hover:not(:disabled), .reader-context-menu button:focus-visible { background: #e8ece6; outline: none; }
+.reader-context-menu button:disabled { color: #aaa69f; cursor: default; }
+.reader-context-menu button small { color: #8c877e; font-size: 11px; }
+.reader-context-menu hr { margin: 5px 3px; border: 0; border-top: 1px solid #ded9d0; }
 .annotation-kind-options, .annotation-color-options { display: flex; align-items: center; gap: 4px; }
 .annotation-kind-options { margin-bottom: 6px; }
 .annotation-kind-options button { border: 0; border-radius: 6px; padding: 5px 7px; background: transparent; color: var(--muted); font-size: 8px; cursor: pointer; }
@@ -692,12 +696,6 @@ button { color: inherit; }
 .folder-dialog > div button.confirm { border-color: var(--ink); background: var(--ink); color: #fff; }
 .folder-dialog > div button.confirm:disabled { opacity: .45; }
 .folder-dialog > div button.confirm.danger { border-color: var(--rust); background: var(--rust); }
-.obsidian-dialog { width: min(520px, calc(100vw - 48px)); }
-.obsidian-dialog-icon { background: #eee9f5; color: #7250a4; }
-.obsidian-dialog p strong { color: var(--ink); }
-.obsidian-dialog ol { margin: 0 0 14px; padding-left: 20px; color: #5f5b54; font-size: 10px; line-height: 1.9; }
-.obsidian-dialog > code { display: block; padding: 10px 11px; border-radius: 9px; background: #eeece6; color: #706b63; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
-.obsidian-dialog > .obsidian-dialog-actions { flex-wrap: wrap; }
 .settings-dialog { width: min(570px, calc(100vw - 48px)); padding: 0; overflow: hidden; }
 .settings-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 20px 22px; border-bottom: 1px solid #dedad2; }
 .settings-header h2 { margin: 0 0 2px; font: 600 18px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
@@ -795,7 +793,7 @@ body { font-size: 15px; }
 .tag-field > small { font-size: 10px; }
 .title-field textarea { font-size: 16px; }
 .note-path span { font-size: 11px; }
-.note-path code, .vault-status { font-size: 10px; }
+.note-path code, .markdown-storage-note { font-size: 10px; }
 .note-path button { font-size: 12px; }
 .inspector-actions button { font-size: 12px; }
 .autosave-state { font-size: 10px; }
@@ -824,5 +822,4 @@ body { font-size: 15px; }
 .reference-list button { font-size: 11px; }
 .references-empty p { font-size: 12px; }
 .toast { font-size: 13px; }
-.folder-context-menu button, .folder-dialog p, .folder-dialog > div button, .obsidian-dialog ol { font-size: 12px; }
-.obsidian-dialog > code { font-size: 11px; }
+.folder-context-menu button, .folder-dialog p, .folder-dialog > div button { font-size: 12px; }

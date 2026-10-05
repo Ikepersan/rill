@@ -10,6 +10,7 @@ import type {
   SearchState,
 } from "./types";
 import { rillReadingOrderV2 } from "./rillReadingOrderV2";
+import { annotationPages } from "./PageGeometryCache";
 import {
   sanitizePersistedAnnotationColor,
   sanitizePersistedAnnotationGeometry,
@@ -129,10 +130,19 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   private unsubscribeBridge: (() => void) | null = null;
   private pageCount = 0;
   private pendingSearch: ((state: SearchState) => void) | null = null;
+  private annotationRevision = -1;
+  private selectionGeneration = 0;
+  private destroyed = false;
 
-  constructor(private readonly frame: HTMLIFrameElement, private readonly boxes: PageBox[]) {}
+  constructor(
+    private readonly frame: HTMLIFrameElement,
+    private readonly boxes: PageBox[],
+    private readonly ensurePageBoxes?: (pages: number[]) => Promise<void>,
+  ) {}
 
   async open(pdf: ArrayBuffer, annotations: PdfAnnotation[]): Promise<DocumentInfo> {
+    await this.ensurePageBoxes?.(annotationPages(annotations));
+    if (this.destroyed) throw new Error("PDF Readerはすでに閉じられています");
     const frameWindow = this.frame.contentWindow as EngineWindow | null;
     if (!frameWindow?.createRillPdfEngine) throw new Error("Rill PDF selection engineを読み込めませんでした");
     // A number[] expands every PDF byte into a boxed JS number and can multiply
@@ -150,6 +160,7 @@ export class IframeRillPdfEngine implements RillPdfEngine {
       colorScheme: "light",
     });
     this.unsubscribeBridge = this.bridge.subscribe((event) => this.handleBridgeEvent(event));
+    this.annotationRevision = 0;
     return new Promise<DocumentInfo>((resolve, reject) => {
       const timer = window.setTimeout(() => reject(new Error("PDFエンジンの初期化がタイムアウトしました")), 20000);
       const unsubscribe = this.subscribe((event) => {
@@ -173,7 +184,9 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   setTool(tool: "pointer" | "area-capture") { this.bridge?.setTool(tool); }
 
   setAnnotations(snapshot: PdfAnnotation[], revision: number) {
-    this.bridge?.setAnnotations(snapshot.map((annotation) => this.toEngineAnnotation(annotation)).filter(isEngineAnnotation), revision);
+    if (!this.bridge || revision <= this.annotationRevision) return;
+    this.bridge.setAnnotations(snapshot.map((annotation) => this.toEngineAnnotation(annotation)).filter(isEngineAnnotation), revision);
+    this.annotationRevision = revision;
   }
 
   search(query: string) {
@@ -191,7 +204,7 @@ export class IframeRillPdfEngine implements RillPdfEngine {
 
   findNext() { this.bridge?.findNext(); }
   findPrevious() { this.bridge?.findPrevious(); }
-  clearSelection() { this.bridge?.clearSelection(); }
+  clearSelection() { this.selectionGeneration += 1; this.bridge?.clearSelection(); }
 
   subscribe(listener: (event: ReaderEvent) => void) {
     this.listeners.add(listener);
@@ -199,6 +212,8 @@ export class IframeRillPdfEngine implements RillPdfEngine {
   }
 
   destroy() {
+    this.destroyed = true;
+    this.selectionGeneration += 1;
     this.unsubscribeBridge?.();
     this.unsubscribeBridge = null;
     this.bridge?.destroy();
@@ -218,28 +233,55 @@ export class IframeRillPdfEngine implements RillPdfEngine {
       return;
     }
     if (event.type === "selection-finalized") {
-      const annotation = this.fromEngineAnnotation(event.annotation as EngineAnnotation);
-      const rect = event.rect as [number, number, number, number];
-      if (!annotation || !rect) return;
-      const frameRect = this.frame.getBoundingClientRect();
-      this.emit({
-        type: "selection-finalized",
-        annotation,
-        anchor: { x: frameRect.left + (rect[0] + rect[2]) / 2, y: frameRect.top + rect[3] },
+      const generation = ++this.selectionGeneration;
+      this.withAnnotationGeometry(event.annotation as EngineAnnotation, () => {
+        if (generation !== this.selectionGeneration) return;
+        const annotation = this.fromEngineAnnotation(event.annotation as EngineAnnotation);
+        const rect = event.rect as [number, number, number, number];
+        if (!annotation || !rect) return;
+        const frameRect = this.frame.getBoundingClientRect();
+        this.emit({
+          type: "selection-finalized",
+          annotation,
+          anchor: { x: frameRect.left + (rect[0] + rect[2]) / 2, y: frameRect.top + rect[3] },
+        });
       });
       return;
     }
     if (event.type === "selection-cleared") {
+      this.selectionGeneration += 1;
       this.emit({ type: "selection-cleared" });
       return;
     }
+    if (event.type === "context-menu-requested") {
+      const x = event.x;
+      const y = event.y;
+      if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) return;
+      const generation = ++this.selectionGeneration;
+      const source = event.annotation as EngineAnnotation | null;
+      const publish = () => {
+        if (generation !== this.selectionGeneration) return;
+        const frameRect = this.frame.getBoundingClientRect();
+        this.emit({
+          type: "context-menu-requested",
+          annotation: source ? this.fromEngineAnnotation(source) : null,
+          anchor: { x: frameRect.left + x, y: frameRect.top + y },
+        });
+      };
+      if (source) this.withAnnotationGeometry(source, publish);
+      else publish();
+      return;
+    }
     if (event.type === "backdrop-tapped") {
+      this.selectionGeneration += 1;
       this.emit({ type: "backdrop-tapped" });
       return;
     }
     if (event.type === "annotation-draft") {
-      const annotation = this.fromEngineAnnotation(event.annotation as EngineAnnotation);
-      if (annotation) this.emit({ type: "annotation-draft", annotation });
+      this.withAnnotationGeometry(event.annotation as EngineAnnotation, () => {
+        const annotation = this.fromEngineAnnotation(event.annotation as EngineAnnotation);
+        if (annotation) this.emit({ type: "annotation-draft", annotation });
+      });
       return;
     }
     if (event.type === "annotation-activated") {
@@ -249,12 +291,14 @@ export class IframeRillPdfEngine implements RillPdfEngine {
     }
     if (event.type === "view-state-changed") {
       const state = event.state as { pageIndex?: number; scale?: number | string };
+      if (typeof state.pageIndex === "number") this.preloadVisibleGeometry(state.pageIndex);
       this.emit({ type: "view-state-changed", ...state });
       return;
     }
     if (event.type === "view-stats-changed") {
       const stats = event.stats as { pagesCount?: number; pageIndex?: number };
       this.pageCount = stats.pagesCount ?? this.pageCount;
+      if (typeof stats.pageIndex === "number") this.preloadVisibleGeometry(stats.pageIndex);
       this.emit({ type: "view-stats-changed", pagesCount: this.pageCount, pageIndex: stats.pageIndex ?? 0 });
       return;
     }
@@ -277,6 +321,28 @@ export class IframeRillPdfEngine implements RillPdfEngine {
     if (event.type === "link-opened") {
       this.emit({ type: "link-opened", url: String(event.url ?? "") });
     }
+  }
+
+  private preloadVisibleGeometry(pageIndex: number) {
+    // Selection can cross onto the next page; warm only this small window.
+    void this.ensurePageBoxes?.([pageIndex + 1, pageIndex + 2]).catch(() => undefined);
+  }
+
+  private withAnnotationGeometry(annotation: EngineAnnotation, publish: () => void) {
+    const index = annotation?.position?.pageIndex;
+    if (typeof index !== "number" || !Number.isInteger(index)) return;
+    const pages = [index + 1];
+    if (annotation.position.nextPageRects?.length) pages.push(index + 2);
+    const missing = pages.filter((page) => !isUsablePageBox(this.boxes[page - 1]));
+    if (!this.ensurePageBoxes || missing.length === 0) {
+      if (!this.destroyed) publish();
+      return;
+    }
+    void this.ensurePageBoxes(missing).then(() => {
+      if (!this.destroyed) publish();
+    }).catch((error) => {
+      if (!this.destroyed) this.emit({ type: "error", message: `PDFのページ情報を読み込めませんでした: ${String(error)}` });
+    });
   }
 
   private toEngineAnnotation(annotation: PdfAnnotation): EngineAnnotation | null {

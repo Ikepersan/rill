@@ -37,7 +37,7 @@ npm run release:macos
 
 The release command signs the app, builds the DMG, submits it to Apple, staples
 the accepted ticket, verifies Gatekeeper acceptance, and creates
-`Rill_1.0.3_SHA256SUMS.txt`. It stops before producing a public artifact if the
+`Rill_1.0.4_SHA256SUMS.txt` for the current source version. It stops before producing a public artifact if the
 worktree is dirty, a submodule is missing or mismatched, or the identity or
 notarization profile is unavailable.
 

@@ -52,9 +52,6 @@ pub fn run() {
             library::save_pdf_annotations,
             library::open_library_folder,
             library::open_pdf_in_preview,
-            library::obsidian_vault_status,
-            library::open_obsidian_app,
-            library::open_note_in_obsidian,
         ])
         .build(tauri::generate_context!())
         .expect("Rillの起動に失敗しました");

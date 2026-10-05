@@ -426,8 +426,6 @@ export default function App() {
   const [citationPresets, setCitationPresets] = useState<CitationPreset[]>([]);
   const [referenceOrder, setReferenceOrder] = useState<string[]>([]);
   const [customCitationStyles, setCustomCitationStyles] = useState<CslStyleFile[]>([]);
-  const [obsidianConnected, setObsidianConnected] = useState(false);
-  const [showObsidianSetup, setShowObsidianSetup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [pdfAvailability, setPdfAvailability] = useState<Record<string, boolean>>({});
   const papersRef = useRef<Paper[]>(papers);
@@ -695,7 +693,6 @@ export default function App() {
         setFolderDialog(null);
         setRenameFolderDialog(null);
         setDeleteFolderTarget(null);
-        setShowObsidianSetup(false);
         setShowSettings(false);
         setShowAddDropZone(false);
       }
@@ -870,15 +867,13 @@ export default function App() {
     const operation = (async () => {
       try {
         await invoke("initialize_library", { root: libraryRoot });
-        const [loaded, loadedCollections, vaultConnected, loadedTrash] = await Promise.all([
+        const [loaded, loadedCollections, loadedTrash] = await Promise.all([
           invoke<Paper[]>("scan_library", { root: libraryRoot }),
           invoke<string[]>("list_collections", { root: libraryRoot }),
-          invoke<boolean>("obsidian_vault_status", { root: libraryRoot }),
           invoke<TrashEntry[]>("list_trashed_papers", { root: libraryRoot }),
         ]);
         setPapers(loaded);
         setCollections(loadedCollections);
-        setObsidianConnected(vaultConnected);
         setTrashEntries(loadedTrash);
         if (selectedId && !loaded.some((paper) => paper.id === selectedId)) setSelectedId(null);
         setSelectedIds((current) => new Set(Array.from(current).filter((id) => loaded.some((paper) => paper.id === id))));
@@ -1099,6 +1094,22 @@ export default function App() {
     }
   }
 
+  async function persistPaperBatch(
+    targets: Paper[],
+    mutate: (current: Paper) => Paper,
+  ): Promise<number> {
+    setBusy(true);
+    let failedCount = 0;
+    try {
+      for (const paper of targets) {
+        if (!await persistPaperMutation(paper, mutate)) failedCount += 1;
+      }
+      return failedCount;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function updateDraft(paper: Paper) {
     reservePaperRevision(paper.id);
     draftDirty.current = true;
@@ -1169,13 +1180,29 @@ export default function App() {
     }
   }
 
+  function applyTranslationIfCurrent(paperId: string, revision: number, translatedSummary: string) {
+    const currentDraft = draftRef.current;
+    const currentRevision = latestRevisionByPaper.current.get(paperId) ?? revision;
+    if (currentDraft?.id !== paperId || currentRevision !== revision) return false;
+
+    // A save may have refreshed noteRevision while translation was pending.
+    updateDraft({ ...currentDraft, translatedSummary });
+    return true;
+  }
+
   async function translateDraftSummary() {
     if (!draft?.summary.trim()) { setToast("先に要約を入力するか、書誌取得でAbstractを取り込んでください"); return; }
     if (!isTauri) { updateDraft({ ...draft, translatedSummary: "Appleの翻訳機能はMacアプリで実行されます。" }); return; }
+    const requestedPaperId = draft.id;
+    const requestedRevision = latestRevisionByPaper.current.get(requestedPaperId) ?? draftRevision.current;
     setBusy(true);
     try {
       const translatedSummary = await invoke<string>("translate_summary", { text: draft.summary });
-      updateDraft({ ...draft, translatedSummary }); setToast("英語から日本語へ翻訳しました");
+      if (!applyTranslationIfCurrent(requestedPaperId, requestedRevision, translatedSummary)) {
+        setToast("翻訳中の編集や文献の切替を優先し、翻訳結果は反映しませんでした");
+        return;
+      }
+      setToast("英語から日本語へ翻訳しました");
     } catch (error) { setToast(String(error)); }
     finally { setBusy(false); }
   }
@@ -1508,14 +1535,7 @@ export default function App() {
       setToast("選択した文献はすべて読了です");
       return;
     }
-    setBusy(true);
-    let failedCount = 0;
-    for (const paper of targets) {
-      if (!await persistPaperMutation(paper, (current) => ({ ...current, status: "読了" }))) {
-        failedCount += 1;
-      }
-    }
-    setBusy(false);
+    const failedCount = await persistPaperBatch(targets, (current) => ({ ...current, status: "読了" }));
     const suffix = isTauri ? "" : "（プレビュー）";
     if (failedCount === 0) setToast(`${targets.length}件を読了にしました${suffix}`);
     else setToast(`${targets.length}件を読了に変更、${failedCount}件は保存待ちです`);
@@ -1539,14 +1559,7 @@ export default function App() {
       localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
       return next;
     });
-    setBusy(true);
-    let failedCount = 0;
-    for (const paper of targets) {
-      if (!await persistPaperMutation(paper, (current) => ({ ...current, isReference: true }))) {
-        failedCount += 1;
-      }
-    }
-    setBusy(false);
+    const failedCount = await persistPaperBatch(targets, (current) => ({ ...current, isReference: true }));
     const suffix = isTauri ? "" : "（プレビュー）";
     if (failedCount === 0) setToast(`${targets.length}件を参考文献に追加しました${suffix}`);
     else setToast(`${targets.length}件を参考文献に追加、${failedCount}件は保存待ちです`);
@@ -1907,17 +1920,10 @@ export default function App() {
     const addedTags = parseTags(tagInput);
     if (targets.length === 0 || addedTags.length === 0) return false;
     const currentTargets = targets.map(currentPaperSnapshot);
-    setBusy(true);
-    let failedCount = 0;
-    for (const paper of currentTargets) {
-      if (!await persistPaperMutation(paper, (current) => ({
-        ...current,
-        tags: Array.from(new Set([...current.tags, ...addedTags])),
-      }))) {
-        failedCount += 1;
-      }
-    }
-    setBusy(false);
+    const failedCount = await persistPaperBatch(currentTargets, (current) => ({
+      ...current,
+      tags: Array.from(new Set([...current.tags, ...addedTags])),
+    }));
     const suffix = isTauri ? "" : "（プレビュー）";
     if (failedCount === 0) setToast(`${currentTargets.length}件に${addedTags.length}個のタグを追加しました${suffix}`);
     else setToast(`${currentTargets.length}件にタグを追加、${failedCount}件は保存待ちです`);
@@ -1934,14 +1940,7 @@ export default function App() {
       localStorage.setItem(referenceOrderStorageKey(root), JSON.stringify(next));
       return next;
     });
-    setBusy(true);
-    let failedCount = 0;
-    for (const paper of currentTargets) {
-      if (!await persistPaperMutation(paper, (current) => ({ ...current, isReference: false }))) {
-        failedCount += 1;
-      }
-    }
-    setBusy(false);
+    const failedCount = await persistPaperBatch(currentTargets, (current) => ({ ...current, isReference: false }));
     const suffix = isTauri ? "" : "（プレビュー）";
     if (failedCount === 0) setToast(`${currentTargets.length}件を参考文献から外しました${suffix}`);
     else setToast(`${currentTargets.length}件を参考文献から解除、${failedCount}件は保存待ちです`);
@@ -1955,53 +1954,6 @@ export default function App() {
   async function toggleFavorite(paper: Paper) {
     const isFavorite = !currentPaperSnapshot(paper).isFavorite;
     await persistPaperMutation(paper, (current) => ({ ...current, isFavorite }));
-  }
-
-  async function openPaperNote(paper: Paper) {
-    if (!obsidianConnected) {
-      setShowObsidianSetup(true);
-      return;
-    }
-    if (!isTauri) {
-      setToast("MacアプリではObsidianの該当ノートが開きます");
-      return;
-    }
-    try {
-      await invoke("open_note_in_obsidian", { root, notePath: paper.notePath });
-    } catch (error) {
-      setToast(String(error));
-    }
-  }
-
-  async function refreshObsidianStatus() {
-    if (!isTauri) {
-      setToast("MacアプリでVault接続を確認できます");
-      return;
-    }
-    try {
-      const connected = await invoke<boolean>("obsidian_vault_status", { root });
-      setObsidianConnected(connected);
-      if (connected) {
-        setShowObsidianSetup(false);
-        setToast("Obsidian Vaultとの接続を確認しました");
-      } else {
-        setToast("まだVaultとして登録されていません");
-      }
-    } catch (error) {
-      setToast(String(error));
-    }
-  }
-
-  async function openObsidianApp() {
-    if (!isTauri) {
-      setToast("MacアプリではObsidianを起動します");
-      return;
-    }
-    try {
-      await invoke("open_obsidian_app");
-    } catch (error) {
-      setToast(String(error));
-    }
   }
 
   async function openLibraryFolder() {
@@ -2042,7 +1994,7 @@ export default function App() {
             <button className="primary-action" type="button" onClick={chooseLibrary}>ライブラリフォルダを選ぶ</button>
           </section>
         </main>
-        {showSettings && <SettingsDialog root={root} obsidianConnected={false} onClose={() => setShowSettings(false)} onChooseRoot={() => void chooseLibrary()} onOpenRoot={() => {}} onObsidianSetup={() => setShowObsidianSetup(true)} />}
+        {showSettings && <SettingsDialog root={root} onClose={() => setShowSettings(false)} onChooseRoot={() => void chooseLibrary()} onOpenRoot={() => {}} />}
       </>
     );
   }
@@ -2104,8 +2056,6 @@ export default function App() {
           onOpenRoot={openLibraryFolder}
           onImport={importPdfs}
           dropActive={pdfDropTarget === "overview"}
-          obsidianConnected={obsidianConnected}
-          onObsidianSetup={() => setShowObsidianSetup(true)}
         />
       ) : view === "references" ? (
         <ReferencesView
@@ -2339,7 +2289,6 @@ export default function App() {
               onClose={() => setSelectedId(null)}
               onSave={saveDraft}
               onOpenPdf={() => openPaperViewer(draft)}
-              onOpenNote={() => openPaperNote(draft)}
               onStatusChange={changeReadingStatus}
               onFlagChange={(color) => void changeFlag(draft, color)}
               onFavoriteChange={() => void toggleFavorite(draft)}
@@ -2350,8 +2299,6 @@ export default function App() {
               onMoveToFolder={moveDraftToFolder}
               saveState={saveState}
               pdfAvailable={pdfAvailability[draft.id] ?? null}
-              obsidianConnected={obsidianConnected}
-              onObsidianSetup={() => setShowObsidianSetup(true)}
             />
           )}
         </section>
@@ -2432,27 +2379,12 @@ export default function App() {
           </section>
         </div>
       )}
-      {showObsidianSetup && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setShowObsidianSetup(false)}>
-          <section className="folder-dialog obsidian-dialog" onMouseDown={(event) => event.stopPropagation()}>
-            <span className="dialog-icon obsidian-dialog-icon">◇</span>
-            <h2>Obsidian Vaultを設定</h2>
-            <p><strong>Vault（保管庫）</strong>は、ObsidianがMarkdownをまとめて管理するフォルダです。Rillの保存場所をそのままVaultにすると、Notesの文献ノートをObsidianから編集できます。</p>
-            <p><strong>この登録はMacごとに初回の1回だけ必要です。</strong>VaultをGoogle Driveなどで同期しても、Obsidianの登録情報は別のMacへ自動では移りません。</p>
-            <ol><li>「Obsidianを起動」を押す</li><li>Obsidianで「保管庫を開く」→「フォルダを保管庫として開く」を選ぶ</li><li>下記のRill保存場所を選ぶ</li></ol>
-            <code>{root}</code>
-            <div className="obsidian-dialog-actions"><button type="button" onClick={() => void openLibraryFolder()}>Finderで場所を表示</button><button type="button" onClick={() => void openObsidianApp()}>Obsidianを起動</button><button className="confirm" type="button" onClick={() => void refreshObsidianStatus()}>接続を確認</button></div>
-          </section>
-        </div>
-      )}
       {showSettings && (
         <SettingsDialog
           root={root}
-          obsidianConnected={obsidianConnected}
           onClose={() => setShowSettings(false)}
           onChooseRoot={() => void chooseLibrary()}
           onOpenRoot={() => void openLibraryFolder()}
-          onObsidianSetup={() => { setShowSettings(false); setShowObsidianSetup(true); }}
         />
       )}
       {toast && <div className="toast">{toast}</div>}
@@ -2460,20 +2392,18 @@ export default function App() {
   );
 }
 
-function SettingsDialog({ root, obsidianConnected, onClose, onChooseRoot, onOpenRoot, onObsidianSetup }: {
+function SettingsDialog({ root, onClose, onChooseRoot, onOpenRoot }: {
   root: string;
-  obsidianConnected: boolean;
   onClose: () => void;
   onChooseRoot: () => void;
   onOpenRoot: () => void;
-  onObsidianSetup: () => void;
 }) {
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="folder-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="settings-header">
           <RillMark />
-          <div><h2 id="settings-title">設定</h2><p>Rillの保存場所と連携を管理します。</p></div>
+          <div><h2 id="settings-title">設定</h2><p>Rillの保存場所と翻訳を管理します。</p></div>
           <button className="settings-close" type="button" aria-label="設定を閉じる" onClick={onClose}>×</button>
         </header>
         <div className="settings-section">
@@ -2485,8 +2415,7 @@ function SettingsDialog({ root, obsidianConnected, onClose, onChooseRoot, onOpen
           </div>
         </div>
         <div className="settings-section settings-row">
-          <div><h3>Obsidian</h3><p>{obsidianConnected ? "Vault接続済み" : "MarkdownノートをObsidianとつなぐ"}</p></div>
-          <button type="button" disabled={!root} onClick={onObsidianSetup}>{root ? (obsidianConnected ? "接続を確認" : "設定する") : "保存場所を先に選択"}</button>
+          <div><h3>Markdown保存</h3><p>メモとPDF注釈は、ライブラリ内のNotesフォルダへ自動保存されます。外部アプリの設定は不要です。</p></div>
         </div>
         <div className="settings-section settings-row">
           <div><h3>翻訳</h3><p>英語から日本語への和訳には、macOSの翻訳機能を使います。言語は「システム設定 › 一般 › 言語と地域」で管理できます。</p></div>
@@ -2521,8 +2450,6 @@ function Overview({
   onOpenRoot,
   onImport,
   dropActive,
-  obsidianConnected,
-  onObsidianSetup,
 }: {
   papers: Paper[];
   stats: { total: number; unread: number; reading: number; inbox: number };
@@ -2533,8 +2460,6 @@ function Overview({
   onOpenRoot: () => void;
   onImport: () => void;
   dropActive: boolean;
-  obsidianConnected: boolean;
-  onObsidianSetup: () => void;
 }) {
   return (
     <section className="overview">
@@ -2573,11 +2498,11 @@ function Overview({
         </section>
 
         <aside className="local-flow-card">
-          <div className="section-title"><div><span>保存と連携</span><small>PDFとメモの保存先</small></div><em>●</em></div>
+          <div className="section-title"><div><span>ローカル保存</span><small>PDFとメモの保存先</small></div><em>●</em></div>
           <button className="flow-folder" onClick={onOpenRoot}><span className="folder-icon">⌑</span><div><strong>Rill ライブラリ</strong><small>{root}</small></div><i>↗</i></button>
           <div className="flow-line"><span>↓</span><small>PDFとメモ</small></div>
           <div className="flow-destinations">
-            <button type="button" className={obsidianConnected ? "obsidian-destination connected" : "obsidian-destination"} onClick={onObsidianSetup}><span className="obsidian-glyph">◇</span><strong>Obsidian</strong><small>{obsidianConnected ? "接続済み" : "接続する"}</small></button>
+            <div><span className="markdown-glyph">MD</span><strong>Markdownノート</strong><small>Notesフォルダに自動保存</small></div>
           </div>
           <button className="change-root" onClick={onChooseRoot}>保存場所を変更</button>
         </aside>
@@ -2934,19 +2859,17 @@ function TrashWorkspace({ entries, busy, onRestore, onDelete, onOpenFolder }: {
   );
 }
 
-function PaperInspector({ paper, root, busy, saveState, pdfAvailable, collections, obsidianConnected, onChange, onClose, onSave, onOpenPdf, onOpenNote, onStatusChange, onFlagChange, onFavoriteChange, onEnrich, onTranslate, onTrash, onMoveToFolder, onObsidianSetup }: {
+function PaperInspector({ paper, root, busy, saveState, pdfAvailable, collections, onChange, onClose, onSave, onOpenPdf, onStatusChange, onFlagChange, onFavoriteChange, onEnrich, onTranslate, onTrash, onMoveToFolder }: {
   paper: Paper;
   root: string;
   busy: boolean;
   saveState: string;
   pdfAvailable: boolean | null;
   collections: string[];
-  obsidianConnected: boolean;
   onChange: (paper: Paper) => void;
   onClose: () => void;
   onSave: () => void;
   onOpenPdf: () => void;
-  onOpenNote: () => void;
   onStatusChange: (status: string) => void;
   onFlagChange: (color: string) => void;
   onFavoriteChange: () => void;
@@ -2954,7 +2877,6 @@ function PaperInspector({ paper, root, busy, saveState, pdfAvailable, collection
   onTranslate: () => void;
   onTrash: () => void;
   onMoveToFolder: (collection: string) => void;
-  onObsidianSetup: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -3104,7 +3026,7 @@ function PaperInspector({ paper, root, busy, saveState, pdfAvailable, collection
         {(paper.translatedSummary || paper.summary) && <div className="field translated-summary"><span>和訳</span><textarea aria-label="和訳" value={paper.translatedSummary} rows={5} placeholder="和訳ボタンを押すとここへ保存されます" onChange={(event) => onChange({ ...paper, translatedSummary: event.target.value })} /></div>}
         <label className="field"><span>Clinical note</span><textarea value={paper.clinicalNote} rows={5} placeholder="診療でどう使うか、疑問点など…" onChange={(event) => onChange({ ...paper, clinicalNote: event.target.value })} /></label>
 
-        <div className="note-path"><span>Markdown</span><code>{absolutePath(root, paper.notePath)}</code><small className={obsidianConnected ? "vault-status connected" : "vault-status"}>{obsidianConnected ? "● Obsidian Vault接続済み" : "○ Obsidian Vault未設定"}</small><button onClick={obsidianConnected ? onOpenNote : onObsidianSetup}>{obsidianConnected ? "Obsidianでこのノートを開く ◇" : "Obsidian Vaultを設定"}</button></div>
+        <div className="note-path"><span>Markdown</span><code>{absolutePath(root, paper.notePath)}</code><small className="markdown-storage-note">メモとPDF注釈をこのファイルへ保存します</small></div>
       </div>
       <div className="details-scrollbar" ref={trackRef} onPointerDown={jumpScrollbar} aria-label="Paper detailsのスクロールバー">
         <div

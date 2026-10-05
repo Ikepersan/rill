@@ -2,18 +2,34 @@
 
 ## Unreleased
 
+Target version: `1.0.4`. The signed public download remains `1.0.3` until
+Developer ID signing, Apple notarization, and release verification are complete.
+
 ### Improved
 
+- Removed Obsidian-specific connection checks, setup screens, and launch actions.
+  Markdown notes, PDF annotation persistence, and external-edit conflict
+  protection remain independent of any external editor.
+- Added a PDF-only context menu for right-click and macOS Control-click, with
+  selection copy, text annotations, search, and opening in Preview.
+- Loaded PDF page geometry on demand while retaining exact page CropBoxes and
+  preloading the pages needed by saved annotations and cross-page selections.
+- Deferred outline and thumbnail work until the main PDF engine opens, and
+  reused unchanged thumbnail components during reader updates.
+- Avoided reconverting and resending annotation snapshots when only their save
+  status changes; rollback revisions still update the PDF engine.
 - Synced the containing directory after atomic local-library file replacements so
   note, index, annotation, and configuration filenames survive power loss more
   reliably.
 
 ### Fixed
 
-- Avoided reporting an Obsidian Vault as connected after a Mac migration until
-  that Vault is registered with Obsidian on the current Mac.
+- Kept delayed translation results from replacing newer edits or another selected
+  paper, and preserved the latest Markdown revision acknowledgement.
+- Released the busy state after batch reading-status, reference, and tag updates
+  while retaining partial-save failure reporting.
 - Coalesced repeated macOS focus events into one non-blocking library refresh so
-  returning from Obsidian does not queue overlapping full-library scans.
+  returning from another application does not queue overlapping full-library scans.
 
 ## 1.0.3
 

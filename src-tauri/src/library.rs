@@ -1211,7 +1211,7 @@ fn merge_paper_changes(base: &Paper, incoming: &Paper, current: &Paper) -> Resul
     merge_field!(translated_summary, "和訳");
     merge_field!(clinical_note, "Clinical note");
     if !conflicts.is_empty() {
-        return Err(format!("ObsidianとRillの両方で同じ項目（{}）が変更されています。内容を失わないため保存を止めました。↻で再読込して調整してください。", conflicts.join("、")));
+        return Err(format!("外部の編集とRillで同じ項目（{}）が変更されています。内容を失わないため保存を止めました。↻で再読込して調整してください。", conflicts.join("、")));
     }
     merged.note_revision = current.note_revision.clone();
     Ok(merged)
@@ -2761,7 +2761,7 @@ pub fn save_paper(root: String, paper: Paper) -> Result<Paper, String> {
         && !paper.note_revision.is_empty()
         && note_revision(&note_path) != paper.note_revision
     {
-        let base = load_revision_snapshot(&root, &paper).ok_or_else(|| "Obsidian側の更新を検出しました。安全なマージ履歴がないため、↻で再読込してください。".to_string())?;
+        let base = load_revision_snapshot(&root, &paper).ok_or_else(|| "Rillの外部でノートが更新されています。安全なマージ履歴がないため、↻で再読込してください。".to_string())?;
         let current =
             paper_from_files_with_identity(&root, &pdf_path, Some(&note_path), Some(&paper.id))?;
         paper = merge_paper_changes(&base, &paper, &current)?;
@@ -2880,7 +2880,9 @@ pub fn organize_paper(root: String, paper: Paper) -> Result<Paper, String> {
         && !paper.note_revision.is_empty()
         && note_revision(&note_path) != paper.note_revision
     {
-        return Err("Obsidian側の更新を検出しました。↻で再読込してから移動してください。".into());
+        return Err(
+            "Rillの外部でノートが更新されています。↻で再読込してから移動してください。".into(),
+        );
     }
     if !paper.pdf_path.starts_with("Inbox/") {
         return Ok(paper);
@@ -3064,7 +3066,9 @@ pub fn move_paper_to_collection(
         && !paper.note_revision.is_empty()
         && note_revision(&note_path) != paper.note_revision
     {
-        return Err("Obsidian側の更新を検出しました。↻で再読込してから移動してください。".into());
+        return Err(
+            "Rillの外部でノートが更新されています。↻で再読込してから移動してください。".into(),
+        );
     }
     if !source.is_file() || !is_pdf(&source) {
         return Err("移動するPDFが見つかりません".into());
@@ -3664,64 +3668,6 @@ fn run_macos_open(arguments: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn percent_encode_uri_value(value: &str) -> String {
-    value
-        .as_bytes()
-        .iter()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (*byte as char).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
-}
-
-fn obsidian_vault_candidates(root: &Path) -> Vec<PathBuf> {
-    [root.to_path_buf(), root.join("Notes")]
-        .into_iter()
-        .filter(|candidate| candidate.join(".obsidian").is_dir())
-        .collect()
-}
-
-fn registered_obsidian_vault_from_json(root: &Path, registry: &[u8]) -> Option<PathBuf> {
-    let registry = serde_json::from_slice::<serde_json::Value>(registry).ok()?;
-    let vaults = registry.get("vaults")?.as_object()?;
-    let registered_paths = vaults
-        .values()
-        .filter_map(|vault| vault.get("path")?.as_str())
-        .filter_map(|path| fs::canonicalize(path).ok())
-        .collect::<HashSet<_>>();
-
-    obsidian_vault_candidates(root)
-        .into_iter()
-        .find_map(|candidate| {
-            let canonical = fs::canonicalize(&candidate).ok()?;
-            registered_paths.contains(&canonical).then_some(candidate)
-        })
-}
-
-fn registered_obsidian_vault(root: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        let registry = fs::read(
-            home.join("Library")
-                .join("Application Support")
-                .join("obsidian")
-                .join("obsidian.json"),
-        )
-        .ok()?;
-        registered_obsidian_vault_from_json(root, &registry)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = root;
-        None
-    }
-}
-
 #[tauri::command]
 pub fn open_library_folder(root: String) -> Result<(), String> {
     let root = root_path(&root)?;
@@ -3739,41 +3685,6 @@ pub fn open_pdf_in_preview(root: String, pdf_path: String) -> Result<(), String>
         return Err("PDFファイルが見つかりません".into());
     }
     run_macos_open(&["-a", "Preview", pdf.to_string_lossy().as_ref()])
-}
-
-#[tauri::command]
-pub fn obsidian_vault_status(root: String) -> Result<bool, String> {
-    let root = root_path(&root)?;
-    Ok(registered_obsidian_vault(&root).is_some())
-}
-
-#[tauri::command]
-pub fn open_obsidian_app() -> Result<(), String> {
-    run_macos_open(&["-a", "Obsidian"])
-}
-
-#[tauri::command]
-pub fn open_note_in_obsidian(root: String, note_path: String) -> Result<(), String> {
-    let root = root_path(&root)?;
-    let note = paper_note_path(&root, &note_path)?;
-    if !note.is_file()
-        || !note
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-    {
-        return Err("Markdownノートが見つかりません".into());
-    }
-    if registered_obsidian_vault(&root).is_none() {
-        return Err(
-            "Obsidianの「保管庫を管理」からRillの保存場所をVaultとして開いてください".into(),
-        );
-    }
-    let uri = format!(
-        "obsidian://open?path={}",
-        percent_encode_uri_value(note.to_string_lossy().as_ref())
-    );
-    run_macos_open(&[&uri])
 }
 
 #[cfg(test)]
@@ -4682,6 +4593,26 @@ mod tests {
     }
 
     #[test]
+    fn library_initialization_leaves_external_editor_configuration_untouched() {
+        let _guard = library_test_guard();
+        let (test_dir, library) = test_library("rill-independent-markdown");
+        let editor_config = library.join(".obsidian/workspace.json");
+        fs::create_dir_all(editor_config.parent().unwrap()).expect("既存エディタ設定を作成");
+        fs::write(&editor_config, b"{\"keep\":true}").expect("既存設定を保存");
+        let note = library.join("Notes/external-note.md");
+        fs::write(&note, "# Existing note\n\nKeep this text.\n").expect("既存ノートを保存");
+
+        initialize_library(library.to_string_lossy().to_string()).expect("設定不要で初期化");
+
+        assert_eq!(fs::read(&editor_config).unwrap(), b"{\"keep\":true}");
+        assert_eq!(
+            fs::read_to_string(&note).unwrap(),
+            "# Existing note\n\nKeep this text.\n"
+        );
+        fs::remove_dir_all(&test_dir).expect("テストデータを削除");
+    }
+
+    #[test]
     fn local_library_round_trip() {
         let _guard = library_test_guard();
         let test_dir = std::env::temp_dir().join(format!("rill-test-{}", Uuid::new_v4()));
@@ -4693,30 +4624,6 @@ mod tests {
         fs::write(&source, b"%PDF-1.4\nRill test PDF\n").expect("テストPDFを作成");
 
         initialize_library(library.to_string_lossy().to_string()).expect("ライブラリを初期化");
-        fs::create_dir_all(test_dir.join("Other Vault")).expect("別のVaultを作成");
-        let registry = serde_json::to_vec(&serde_json::json!({
-            "vaults": {
-                "unrelated": { "path": test_dir.join("Other Vault") }
-            }
-        }))
-        .expect("Obsidian登録情報を作成");
-        assert!(registered_obsidian_vault_from_json(&library, &registry).is_none());
-        fs::create_dir_all(library.join(".obsidian")).expect("Vault設定を作成");
-        assert!(registered_obsidian_vault_from_json(&library, &registry).is_none());
-        let registry = serde_json::to_vec(&serde_json::json!({
-            "vaults": {
-                "rill": { "path": library }
-            }
-        }))
-        .expect("Rill Vault登録情報を作成");
-        assert_eq!(
-            registered_obsidian_vault_from_json(&library, &registry),
-            Some(library.clone())
-        );
-        assert_eq!(
-            percent_encode_uri_value("/Rill Library/Notes/日本語.md"),
-            "%2FRill%20Library%2FNotes%2F%E6%97%A5%E6%9C%AC%E8%AA%9E.md"
-        );
         let first_import = import_pdfs_blocking(
             library.to_string_lossy().to_string(),
             vec![source.to_string_lossy().to_string()],

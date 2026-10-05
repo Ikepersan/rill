@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Rill",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "identifier": "app.rill.library",
   "build": {
     "beforeDevCommand": "npm run desktop:frontend:dev",

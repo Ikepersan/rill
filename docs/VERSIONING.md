@@ -1,11 +1,12 @@
 # Rill versioning
 
-Rill's current public release is version `1.0.0`. Version `1.0.3` is the next
-maintenance release candidate.
+Rill's current signed public release is version `1.0.3`. This source branch
+targets the next maintenance release, `1.0.4`. Do not change download links to
+`1.0.4` until its signed, notarized artifact has passed release verification.
 
 Published versions follow semantic versioning:
 
-- patch (`1.0.3`): compatible fixes and small refinements after 1.0
+- patch (`1.0.4`): compatible fixes and small refinements after 1.0
 - minor (`1.1.0`): compatible features
 - major (`2.0.0`): changes that require a migration or materially alter the library format
 

@@ -4,7 +4,7 @@ use tauri::{
 };
 
 const MENU_EVENT: &str = "rill://menu-action";
-const SOURCE_AND_LICENSE_URL: &str = "https://github.com/Ikepersan/rill/tree/v1.0.3";
+const SOURCE_AND_LICENSE_URL: &str = "https://github.com/Ikepersan/rill/tree/v1.0.4";
 
 #[cfg(target_os = "macos")]
 fn open_source_and_license() {

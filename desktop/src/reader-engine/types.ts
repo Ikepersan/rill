@@ -22,6 +22,7 @@ export type ReaderEvent =
   | { type: "initialized" }
   | { type: "selection-finalized"; annotation: PdfAnnotation; anchor: { x: number; y: number } }
   | { type: "selection-cleared" }
+  | { type: "context-menu-requested"; annotation: PdfAnnotation | null; anchor: { x: number; y: number } }
   | { type: "backdrop-tapped" }
   | { type: "annotation-draft"; annotation: PdfAnnotation }
   | { type: "annotation-activated"; annotationId: string | null }

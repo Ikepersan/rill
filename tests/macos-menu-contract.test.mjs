@@ -16,7 +16,7 @@ test("macOS menu exposes settings, primary library actions, and version help", a
   assert.match(menu, /"Rillのバージョン"/);
   assert.match(menu, /"ライセンスとソースコード…"/);
   assert.match(menu, /"open-source-and-license"/);
-  assert.match(menu, /https:\/\/github\.com\/Ikepersan\/rill\/tree\/v1\.0\.3/);
+  assert.match(menu, /https:\/\/github\.com\/Ikepersan\/rill\/tree\/v1\.0\.4/);
   assert.match(menu, /Command::new\("open"\)/);
   assert.match(menu, /package_info\(\)\.version/);
   assert.match(menu, /MenuItem::with_id\(app, "copy", "コピー", true, Some\("CmdOrCtrl\+C"\)\)/);
@@ -27,7 +27,7 @@ test("macOS menu exposes settings, primary library actions, and version help", a
   assert.match(app, /<SettingsDialog/);
 });
 
-test("all release manifests and source notices agree on version 1.0.3", async () => {
+test("all release manifests and source notices agree on version 1.0.4", async () => {
   const [packageJson, packageLock, tauriConfig, cargoToml, cargoLock, menu, agplNotice, thirdPartyNotice] = await Promise.all([
     read("package.json"),
     read("package-lock.json"),
@@ -41,7 +41,7 @@ test("all release manifests and source notices agree on version 1.0.3", async ()
 
   const version = JSON.parse(packageJson).version;
   const parsedPackageLock = JSON.parse(packageLock);
-  assert.equal(version, "1.0.3");
+  assert.equal(version, "1.0.4");
   assert.equal(parsedPackageLock.version, version);
   assert.equal(parsedPackageLock.packages[""].version, version);
   assert.equal(JSON.parse(tauriConfig).version, version);

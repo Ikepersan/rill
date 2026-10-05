@@ -2,21 +2,41 @@
 
 Rill is a local-first macOS application for managing medical papers. PDFs remain
 in a user-selected local folder, while bibliographic metadata, reading notes,
-annotations, and Obsidian-compatible Markdown stay alongside the library.
+annotations, and plain Markdown files stay alongside the library. Reading and
+note-taking do not require an external note application.
+
+This source branch targets `1.0.4`. The signed public download is still
+`1.0.3`; the changes described under **Upcoming 1.0.4** are not included in that
+download yet.
 
 ## Download
 
-**[Download Rill 1.0.0 for Apple silicon (DMG)](https://github.com/Ikepersan/rill/releases/download/v1.0.0/Rill_1.0.0_aarch64.dmg)**
+**[Download Rill 1.0.3 for Apple silicon (DMG)](https://github.com/Ikepersan/rill/releases/download/v1.0.3/Rill_1.0.3_aarch64.dmg)**
 
 Open the downloaded DMG and drag `Rill.app` into `Applications`.
 The distribution is signed with a Developer ID certificate and notarized by
 Apple.
 
-[View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.0)
+[View the release notes and SHA-256 checksum](https://github.com/Ikepersan/rill/releases/tag/v1.0.3)
 
-## Upcoming maintenance release
+## Upcoming 1.0.4
 
-Version `1.0.3` is being prepared and includes everything in the first public
+- no Obsidian connection checks, Vault setup, or Obsidian launch actions
+- unchanged Markdown note and PDF annotation storage, with external-edit conflict protection
+- on-demand PDF page geometry and deferred outline/thumbnail work for a lighter reader startup
+- right-click and macOS Control-click menus for copy, annotations, search, and opening in Preview
+- coalesced library refreshes when returning to Rill
+- translation results that do not overwrite newer edits or a different selected paper
+- batch actions that always release their busy state and retain save-failure reporting
+- more durable atomic local-file replacements
+
+Version `1.0.4` is not a public distributable yet. The download remains
+`1.0.3` until Developer ID signing, Apple notarization, and release verification
+are complete. Local ad hoc builds are for testing only.
+
+## Current signed release
+
+Version `1.0.3` includes everything in the first public
 release, plus:
 
 - folder renaming from the Library context menu
@@ -29,12 +49,9 @@ release, plus:
 - lower reader memory use and lazy thumbnail rendering
 - reliable retry and rollback when local saves fail
 
-The download above remains version `1.0.0` until `1.0.3` has passed the complete
-Developer ID signing and Apple notarization process.
+## Core features
 
-## Current signed release
-
-Version `1.0.0` is the first stable public release and includes:
+Rill also includes:
 
 - a native macOS menu bar with Settings, library actions, view shortcuts, and version Help
 - a calmer Overview with refined typography, quieter empty states, and user-facing storage labels
@@ -51,11 +68,24 @@ Version `1.0.0` is the first stable public release and includes:
 - visible filters and sorting by date, year, title, author, status, or importance
 - built-in PDF reader with search, outline, thumbnails, and spread view
 - highlights, underline, strikeout, area capture, and reading notes
-- safe three-way merging with Obsidian Markdown
+- safe three-way merging with externally edited Markdown
 - CSL citation styles, BibTeX, and Markdown reference export
 - full-text search across PDF and Markdown content on macOS
 - on-device English-to-Japanese translation using Apple's Translation framework,
   with automatic guidance to Language & Region when language data is missing
+
+## Storage and synchronized folders
+
+Rill saves PDFs and notes to the local library folder you choose. Markdown
+files remain under `Notes/` and can be opened manually in other editors.
+Version `1.0.4` removes only the dedicated Obsidian integration, not Markdown
+storage; existing `.obsidian` configuration is left untouched.
+
+You can choose a Google Drive or iCloud Drive folder, but synchronization is
+handled by the corresponding desktop service, not by Rill. Make files
+available locally and let synchronization finish before opening the same
+library on another Mac. A successful local save does not confirm a completed
+cloud upload, and Rill does not coordinate simultaneous edits across Macs.
 
 ## PDF reader engine
 

@@ -323,10 +323,10 @@ test("Back and Escape wait for annotation persistence before leaving the reader"
   assert.doesNotMatch(reader, /if \(repository\) void repository\.flush\(\);\s+onRegisterFlush\?\.\(null\)/);
 });
 
-test("the current macOS release is Rill 1.0.3", async () => {
+test("the macOS source targets Rill 1.0.4", async () => {
   const config = JSON.parse(await read("src-tauri/tauri.conf.json"));
   assert.equal(config.productName, "Rill");
-  assert.equal(config.version, "1.0.3");
+  assert.equal(config.version, "1.0.4");
   assert.equal(config.identifier, "app.rill.library");
 });
 
@@ -346,9 +346,9 @@ test("bundled engine records source, patch, licenses and fixed commits", async (
   assert.match(license, /^\s*GNU AFFERO GENERAL PUBLIC LICENSE/);
   assert.match(license, /Version 3, 19 November 2007/);
   assert.doesNotMatch(license, /pdf-reader is copyright|Zotero name is a registered trademark/);
-  assert.match(releaseNotice, /Rill 1\.0\.3/);
-  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v1\.0\.3/);
-  assert.match(notice, /Rill 1\.0\.3/);
+  assert.match(releaseNotice, /Rill 1\.0\.4/);
+  assert.match(releaseNotice, /github\.com\/Ikepersan\/rill\/tree\/v1\.0\.4/);
+  assert.match(notice, /Rill 1\.0\.4/);
   assert.doesNotMatch(notice, /Rill 0\.7\.11/);
   assert.match(notice, /modified for Rill on 2026-07-19/);
   assert.match(notice, new RegExp(commit));

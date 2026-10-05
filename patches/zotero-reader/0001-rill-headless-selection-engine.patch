@@ -44,7 +44,15 @@ index 9133044..2c7cbef 100644
  			await this._annotationManager.addAnnotation(annotation);
  		};
  
-@@ -161,6 +164,10 @@ class View {
+@@ -107,6 +110,7 @@ class View {
+ 			onSetDataTransferAnnotations: nop,
+ 			onFocus: nop,
++			onContextMenu: this._options.onContextMenu,
+ 			onOpenAnnotationContextMenu: nop,
+ 			onOpenViewContextMenu: nop,
+ 			onSetOverlayPopup: nop,
+ 			onSetOutline: (outline) => {
+@@ -161,6 +165,10 @@ class View {
  		this._annotationManager.setAnnotations(annotations);
  	}
  
@@ -55,7 +63,7 @@ index 9133044..2c7cbef 100644
  	// Remove annotations from the view
  	unsetAnnotations(ids) {
  		this._annotationManager.unsetAnnotations(ids);
-@@ -304,6 +311,15 @@ class View {
+@@ -304,6 +312,15 @@ class View {
  		this._view.setSpreadMode(mode);
  	}
  
@@ -170,6 +178,43 @@ index 9af7569..9ec90b1 100644
  			else if (annotation.type === 'note') {
  				this._pushNote(items, annotation);
  			}
+diff --git a/src/pdf/pdf-view.js b/src/pdf/pdf-view.js
+--- a/src/pdf/pdf-view.js
++++ b/src/pdf/pdf-view.js
+@@ -2677,6 +2677,15 @@ export default class PDFView {
+ 	_handlePointerDown(event) {
++		// Keep Rill's text selection intact for secondary clicks. Control-click
++		// on macOS may arrive as a primary click before the contextmenu event.
++		if (this._options.onContextMenu && !this._textAnnotationFocused()
++			&& event.target.closest('#viewerContainer')
++			&& (event.button === 2 || event.button === 0 && event.ctrlKey && isMac())) {
++			event.preventDefault();
++			if (event.button === 0) this._handleContextMenu(event);
++			return;
++		}
+ 		// Prevent double-click word highlight on triple-click
+ 		if (this._creationTimeout) {
+ 			clearTimeout(this._creationTimeout);
+ 			this._creationTimeout = null;
+ 		}
+@@ -3624,6 +3633,17 @@ export default class PDFView {
+ 	_handleContextMenu(event) {
++		if (this._options.onContextMenu && !this._textAnnotationFocused()
++			&& event.target.closest('#viewerContainer')) {
++			event.preventDefault();
++			this._pointerDownTriggered = false;
++			this._pointerDownTap = null;
++			let br = this._iframe.getBoundingClientRect();
++			let annotation = this._isSelectionCollapsed() ? null
++				: this._getAnnotationFromSelectionRanges(this._selectionRanges, 'highlight');
++			this._options.onContextMenu({ x: br.x + event.clientX, y: br.y + event.clientY, annotation });
++			return;
++		}
+ 		if (this._options.platform === 'web') {
+ 			return;
+ 		}
+ 
+ 		let position = this.pointerEventToPosition(event);
 diff --git a/webpack.config.js b/webpack.config.js
 index 2973701..3fb2e4f 100644
 --- a/webpack.config.js
@@ -204,7 +249,7 @@ new file mode 100644
 index 0000000..bfa1e2f
 --- /dev/null
 +++ b/src/index.rill.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,79 @@
 +import View from './common/view';
 +
 +// UI-free bridge used by Rill. The upstream View renders PDF pages and text
@@ -251,7 +296,8 @@ index 0000000..bfa1e2f
 +		onFindResult: (result) => emit('search-changed', { result }),
 +		onChangeViewState: (state) => emit('view-state-changed', { state }),
 +		onChangeViewStats: (stats) => emit('view-stats-changed', { stats }),
-+		onBackdropTap: () => emit('backdrop-tapped')
++		onBackdropTap: () => emit('backdrop-tapped'),
++		onContextMenu: params => emit('context-menu-requested', params)
 +	});
 +
 +	return Object.freeze({
