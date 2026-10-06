@@ -17,7 +17,6 @@ function cloneAnnotations(annotations: PdfAnnotation[]) {
 
 export class AnnotationRepository {
   private state: RepositoryState = { annotations: [], revision: 0, status: "ready" };
-  private persisted: PdfAnnotation[] = [];
   private listeners = new Set<(state: RepositoryState) => void>();
   private saveQueue: Promise<void> = Promise.resolve();
   private generation = 0;
@@ -29,7 +28,6 @@ export class AnnotationRepository {
 
   initialize(annotations: PdfAnnotation[]) {
     const snapshot = cloneAnnotations(annotations);
-    this.persisted = snapshot;
     this.state = { annotations: snapshot, revision: 0, status: "saved" };
     this.emit();
   }
@@ -69,33 +67,53 @@ export class AnnotationRepository {
     return this.enqueueSave(snapshot, message);
   }
 
-  flush() {
-    if (this.state.status === "dirty") return this.commit();
-    return this.saveQueue;
+  async flush() {
+    // A failed automatic save must not discard edits or let the reader close.
+    // Retry the latest in-memory snapshot once, then propagate a persistent error.
+    let retriedError = false;
+    while (true) {
+      await this.waitForSaves();
+      if (this.state.status === "error") {
+        if (retriedError) throw new Error(this.state.error || "注釈を保存できませんでした");
+        retriedError = true;
+      } else if (this.state.status !== "dirty") {
+        return;
+      }
+      await this.commit();
+    }
+  }
+
+  private async waitForSaves() {
+    let pending: Promise<void>;
+    do {
+      pending = this.saveQueue;
+      await pending;
+    } while (pending !== this.saveQueue);
   }
 
   private enqueueSave(snapshot: PdfAnnotation[], message?: string) {
     const operationGeneration = this.generation;
+    const operationRevision = this.state.revision;
     this.saveQueue = this.saveQueue.then(async () => {
       if (operationGeneration !== this.generation) return;
       try {
         await this.saveSnapshot(cloneAnnotations(snapshot));
         if (operationGeneration !== this.generation) return;
-        this.persisted = cloneAnnotations(snapshot);
-        this.state = { ...this.state, status: "saved", error: undefined };
-        this.emit();
+        if (operationRevision === this.state.revision) {
+          this.state = { ...this.state, status: "saved", error: undefined };
+          this.emit();
+        }
         if (message) this.onMessage(message);
       } catch (error) {
         if (operationGeneration !== this.generation) return;
         this.generation += 1;
         this.state = {
-          annotations: cloneAnnotations(this.persisted),
-          revision: this.state.revision + 1,
+          ...this.state,
           status: "error",
           error: String(error),
         };
         this.emit();
-        this.onMessage(`保存できなかったため直前の状態へ戻しました: ${String(error)}`);
+        this.onMessage(`注釈を保存できませんでした。編集内容は画面に残しています。「保存を再試行」で再保存してください: ${String(error)}`);
       }
     });
     return this.saveQueue;

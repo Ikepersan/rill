@@ -218,7 +218,7 @@ test("PDF text copying handles clipboard and fallback failures without leaking D
   }), false);
 });
 
-test("AnnotationRepository updates optimistically and rolls back a failed save", async () => {
+test("AnnotationRepository retains unsaved edits after a failed save", async () => {
   const source = await read("desktop/src/reader-engine/AnnotationRepository.ts");
   const javascript = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
@@ -243,10 +243,94 @@ test("AnnotationRepository updates optimistically and rolls back a failed save",
   await new Promise((resolve) => setTimeout(resolve, 0));
   rejectSave(new Error("disk full"));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(states.at(-1).annotations.length, 0);
+  assert.equal(states.at(-1).annotations.length, 1);
   assert.equal(states.at(-1).status, "error");
-  assert.ok(states.at(-1).revision > revisionBeforeFailure);
-  assert.match(messages.at(-1), /直前の状態へ戻しました/);
+  assert.equal(states.at(-1).revision, revisionBeforeFailure);
+  assert.match(messages.at(-1), /編集内容は画面に残しています/);
+});
+
+test("annotation flush rejects persistent failures, retains the latest edits, and can recover", async () => {
+  const source = await read("desktop/src/reader-engine/AnnotationRepository.ts");
+  const javascript = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { AnnotationRepository } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+  let failing = true;
+  const writes = [];
+  const repository = new AnnotationRepository(async (snapshot) => {
+    if (failing) throw new Error("disk full");
+    writes.push(snapshot);
+  }, () => {});
+  const states = [];
+  repository.subscribe((state) => states.push(state));
+  repository.initialize([]);
+  const annotation = {
+    id: "retry", page: 1, text: "selected text", color: "yellow", kind: "highlight",
+    comment: "", rects: [{ page: 1, x: 0.1, y: 0.1, width: 0.2, height: 0.03 }], createdAt: "2026-10-06T00:00:00Z",
+  };
+  repository.update(() => [annotation]);
+  repository.update((current) => current.map((item) => ({ ...item, comment: "newer unsaved comment" })));
+  await assert.rejects(repository.flush(), /disk full/);
+  assert.equal(repository.snapshot[0].comment, "newer unsaved comment");
+  assert.equal(states.at(-1).status, "error");
+  failing = false;
+  await repository.flush();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0].comment, "newer unsaved comment");
+  assert.equal(states.at(-1).status, "saved");
+});
+
+test("an older queued annotation save never marks a newer draft as saved", async () => {
+  const source = await read("desktop/src/reader-engine/AnnotationRepository.ts");
+  const javascript = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { AnnotationRepository } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+  let release;
+  const writes = [];
+  const repository = new AnnotationRepository(async (snapshot) => {
+    writes.push(snapshot);
+    if (writes.length === 1) await new Promise((resolve) => { release = resolve; });
+  }, () => {});
+  const states = [];
+  repository.subscribe((state) => states.push(state));
+  repository.initialize([]);
+  const annotation = { id: "draft", page: 1, text: "text", color: "yellow", kind: "highlight", comment: "", rects: [], createdAt: "2026-10-06T00:00:00Z" };
+  repository.update(() => [annotation]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  repository.update((current) => current.map((item) => ({ ...item, comment: "still editing" })), { persist: false });
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(states.at(-1).status, "dirty");
+  await repository.flush();
+  assert.equal(writes.at(-1)[0].comment, "still editing");
+  assert.equal(states.at(-1).status, "saved");
+});
+
+test("annotation flush also persists comment edits made while it is saving", async () => {
+  const source = await read("desktop/src/reader-engine/AnnotationRepository.ts");
+  const javascript = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { AnnotationRepository } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+  const releases = [];
+  const writes = [];
+  const repository = new AnnotationRepository(async (snapshot) => {
+    writes.push(snapshot);
+    if (writes.length <= 2) await new Promise((resolve) => { releases.push(resolve); });
+  }, () => {});
+  repository.initialize([]);
+  repository.update(() => [{ id: "flush-race", page: 1, text: "text", color: "yellow", kind: "highlight", comment: "", rects: [], createdAt: "2026-10-06T00:00:00Z" }]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  repository.update((current) => current.map((item) => ({ ...item, comment: "first edit" })), { persist: false });
+  const flushing = repository.flush();
+  releases[0]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  repository.update((current) => current.map((item) => ({ ...item, comment: "new edit during flush" })), { persist: false });
+  releases[1]();
+  await flushing;
+  assert.equal(writes.length, 3);
+  assert.equal(writes.at(-1)[0].comment, "new edit during flush");
 });
 
 test("rillReadingOrderV2 reorders only high-confidence two-column geometry", async () => {
@@ -318,8 +402,11 @@ test("Back and Escape wait for annotation persistence before leaving the reader"
   assert.match(reader, /className="reader-back" onClick=\{\(\) => \{ void closeReader\(\); \}\}/);
   assert.match(
     reader,
-    /const finalFlush = repository\?\.flush\(\) \?\? Promise\.resolve\(\);\s+onRegisterFlushRef\.current\?\.\(\(\) => finalFlush\)/,
+    /const finalFlush = repository\?\.flush\(\) \?\? Promise\.resolve\(\);[\s\S]*?onRegisterFlushRef\.current\?\.\(\(\) => finalFlush\)/,
   );
+  assert.match(reader, /void finalFlush\.catch\(\(\) => undefined\)/);
+  assert.match(reader, /保存エラー・未保存/);
+  assert.match(reader, /保存を再試行/);
   assert.doesNotMatch(reader, /if \(repository\) void repository\.flush\(\);\s+onRegisterFlush\?\.\(null\)/);
 });
 

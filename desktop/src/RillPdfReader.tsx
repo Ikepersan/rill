@@ -184,7 +184,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
 
   const annotations = repositoryState.annotations;
   const saveStatus = repositoryState.error
-    ? "保存エラー・復元済み"
+    ? "保存エラー・未保存"
     : repositoryState.status === "saving"
       ? "保存中…"
       : repositoryState.status === "dirty"
@@ -432,6 +432,9 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
       engineRef.current = null;
       const repository = repositoryRef.current;
       const finalFlush = repository?.flush() ?? Promise.resolve();
+      // Keep the rejected promise registered for the app's exit guard, without
+      // leaving an unhandled rejection when this component is unmounted.
+      void finalFlush.catch(() => undefined);
       onRegisterFlushRef.current?.(() => finalFlush);
       repositoryRef.current = null;
       pdfDocumentRef.current = null;
@@ -549,7 +552,7 @@ export function RillPdfReader({ root, paper, onClose, onOpenExternal, onToast, o
           {error && <div className="pdf-loading error"><span>!</span><p>{error}</p><button type="button" onClick={onOpenExternal}>プレビューで開く</button></div>}
         </div>
         <aside className="reader-notes">
-          <div className="reader-notes-heading"><div><span>Reading notes</span><small>{annotations.length} annotations</small></div><em>{saveStatus}</em></div>
+          <div className="reader-notes-heading"><div><span>Reading notes</span><small>{annotations.length} annotations</small></div><em>{saveStatus}{repositoryState.status === "error" && <button type="button" onClick={() => { void repositoryRef.current?.flush().catch(() => undefined); }}>保存を再試行</button>}</em></div>
           <div className="reader-note-intro">本文は選択して注釈にできます。図表は「範囲を撮影」で囲むと画像メモになります。注釈はRillのMarkdownへ同期されます。</div>
           <div className="annotation-list">
             {annotations.map((annotation) => (

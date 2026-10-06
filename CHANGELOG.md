@@ -17,13 +17,16 @@ Developer ID signing, Apple notarization, and release verification are complete.
 - Deferred outline and thumbnail work until the main PDF engine opens, and
   reused unchanged thumbnail components during reader updates.
 - Avoided reconverting and resending annotation snapshots when only their save
-  status changes; rollback revisions still update the PDF engine.
+  status changes; geometry revisions still update the PDF engine.
 - Synced the containing directory after atomic local-library file replacements so
   note, index, annotation, and configuration filenames survive power loss more
   reliably.
 
 ### Fixed
 
+- Retained unsaved PDF annotations and comments after write failures, added a
+  retry action, and prevented Reader/window exit until persistence succeeds.
+- Kept earlier queued annotation saves from marking newer comment edits as saved.
 - Kept delayed translation results from replacing newer edits or another selected
   paper, and preserved the latest Markdown revision acknowledgement.
 - Released the busy state after batch reading-status, reference, and tag updates
